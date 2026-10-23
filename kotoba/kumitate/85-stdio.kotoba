@@ -1,0 +1,65 @@
+;; 85-stdio (prefix sd-): MCP over stdio, the protocol's standard transport.
+;; Each message is one line of JSON on stdin and each answer one line on
+;; stdout; a notification gets none (mc-handle answers ""). The runtime gives
+;; stdin on wire 41 :io/read (KEXE_ALLOW holds 41); stdin that is not UTF-8
+;; stops the server with the runtime's named trap.
+;;   A newline ends a message and a CR before it is dropped; a blank line is
+;;   skipped. A message over mc-max-input bytes is answered -32600 and its
+;;   bytes are dropped up to its newline. At end of file a last message
+;;   without a newline is still answered, then the server returns.
+;; The runtime keeps stdout in a buffer until exit, and a wire 39 write
+;; flushes it first (stdout before stderr). So each answer is followed by an
+;; empty wire 39 write: the client has it before the server reads again.
+;; Each answer runs in an arena-scope, which releases everything it allocated
+;; when it returns, so a long session keeps only the bytes it read.
+;; Nothing but answers goes to stdout. The tools stay pure.
+
+;; parts: the pieces of the message not yet ended (views into the chunks
+;; read); size: their bytes; skip: the bytes up to the next newline belong to
+;; a dropped message; out: the messages ended so far, "" for one over the limit
+(defrecord SD [parts [:list :string] size :i64 skip :bool out [:list :string]])
+(defn sd-start [] [:ref :kumitate/SD] (->SD (tx-strs) 0 false (tx-strs)))
+
+;; the pieces as one string. The runtime appends in place to the newest
+;; string, so after the first copy each piece is copied once.
+(defn sd-join [parts [:list :string]] :string
+  (if (= (count parts) 1) (nth parts 0)
+    (loop [k 0 acc ""] (if (< k (count parts)) (recur (+ k 1) (tx-cat acc (nth parts k))) acc))))
+(defn sd-line [s :string] :string (if (tx-ends? s "\r") (tx-sub s 0 (- (tx-len s) 1)) s))
+;; the message the parts and the last piece make, or nothing for a blank line
+(defn sd-end [out [:list :string] parts [:list :string] piece :string] [:list :string]
+  (let [m (sd-line (sd-join (conj parts piece)))] (if (tx-empty? (tx-trim m)) out (conj out m))))
+
+;; take in one chunk of stdin, with messages over max bytes refused
+(defn sd-feed [st [:ref :kumitate/SD] c :string max :i64] [:ref :kumitate/SD]
+  (loop [i 0 parts (:parts st) size (:size st) skip (:skip st) out (:out st)]
+    (let [j (string-find-byte c 10 i) e (if (< j 0) (tx-len c) j) piece (tx-sub c i e)
+          over (and (not skip) (> (+ size (tx-len piece)) max))]
+      (if (< j 0)
+        (cond skip (->SD (tx-strs) 0 true out)
+              over (->SD (tx-strs) 0 true (conj out ""))
+              (tx-empty? piece) (->SD parts size false out)
+              :else (->SD (conj parts piece) (+ size (tx-len piece)) false out))
+        (recur (+ j 1) (tx-strs) 0 false
+               (cond skip out over (conj out "") :else (sd-end out parts piece)))))))
+
+(defn sd-too-large [] :string
+  (mc-error (y-null) -32600 (tx-cat3 "invalid request: a message over " (tx-istr (mc-max-input)) " bytes")))
+;; one answer on stdout, handed over by an empty wire 39 write
+(defn sd-send [a :string] :i64
+  (let [w (typed-cap-call :io/write :string :string (tx-cat a "\n"))
+        f (typed-cap-call :io/write-error :string :string "")]
+    1))
+(defn sd-answer [m :string] :i64
+  (let [a (if (tx-empty? m) (sd-too-large) (mc-handle m))] (if (tx-empty? a) 0 (sd-send a))))
+(defn sd-answer-all [ms [:list :string]] :i64
+  (loop [k 0 n 0] (if (< k (count ms)) (recur (+ k 1) (+ n (arena-scope (sd-answer (nth ms k))))) n)))
+
+;; serve stdin until end of file; the number of answers written
+(defn sd-serve [] :i64
+  (loop [st (sd-start) n 0]
+    (let [c (typed-cap-call :io/read :string :string "65536")
+          s (sd-feed st (if (tx-empty? c) "\n" c) (mc-max-input))
+          k (sd-answer-all (:out s))]
+      (if (tx-empty? c) (+ n k)
+        (recur (->SD (:parts s) (:size s) (:skip s) (tx-strs)) (+ n k))))))

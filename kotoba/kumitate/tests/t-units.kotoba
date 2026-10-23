@@ -191,3 +191,15 @@
          (tx-eq (:text (y-get (y-get (t-mcp "{oops") "error") "code")) "-32700")
          (tx-eq (:text (y-get (y-get (t-mcp "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]") "error") "code")) "-32600")
          (tx-eq (:text (y-get (y-get (t-mcp "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"resources/list\"}") "error") "code")) "-32601"))))
+;; stdin chunks -> the messages they end ("" for one over max), joined by |
+(defn t-feed [chunks [:list :string] max :i64] :string
+  (tx-join (loop [k 0 st (sd-start)] (if (< k (count chunks)) (recur (+ k 1) (sd-feed st (nth chunks k) max)) (:out st))) "|"))
+(defn test-stdio [] :bool
+  (and (tx-eq (t-feed (-> (tx-strs) (conj "a\r\n\n  \nb") (conj "c\n") (conj "d") (conj "\n")) 100) "a|bc|d")
+       (tx-eq (t-feed (-> (tx-strs) (conj "{\"x\":\"\\u00e9\"}\n")) 100) "{\"x\":\"\\u00e9\"}")
+       (tx-eq (t-feed (-> (tx-strs) (conj "abcd\n")) 4) "abcd")
+       (tx-eq (t-feed (-> (tx-strs) (conj "abcdefg\nok\n")) 4) "|ok")
+       (tx-eq (t-feed (-> (tx-strs) (conj "abc") (conj "defg") (conj "hi\nx\n")) 4) "|x")
+       (tx-eq (t-feed (-> (tx-strs) (conj "ab") (conj "") (conj "c") (conj "\n")) 4) "abc")
+       (tx-eq (t-feed (-> (tx-strs) (conj "\n") (conj "\r\n")) 4) "")
+       (tx-eq (:text (y-get (y-get (:node (js-parse (sd-too-large))) "error") "code")) "-32600")))

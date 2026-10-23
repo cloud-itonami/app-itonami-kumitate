@@ -1,6 +1,6 @@
 ;; tests/t-gate: the gate's entry (kotoba/kumitate/GATE-MANIFEST). Prints
 ;; PASS or FAIL for each test-* and returns how many passed; the expected
-;; result is 18. A test that is skipped cannot pass: every one is called.
+;; result is 19. A test that is skipped cannot pass: every one is called.
 (defn t-run [name :string ok :bool] :i64
   (let [r (typed-cap-call :io/write :string :string (tx-cat3 (if ok "PASS " "FAIL ") name "\n"))]
     (if ok 1 0)))
@@ -12,4 +12,4 @@
      (t-run "iso-uuid" (test-iso-uuid)) (t-run "xml" (test-xml)) (t-run "plan-matrix" (test-plan-matrix))
      (t-run "plan-refusals" (test-plan-refusals)) (t-run "plan-filters" (test-plan-filters))
      (t-run "plan-expand" (test-plan-expand)) (t-run "runs" (test-runs)) (t-run "junit" (test-junit))
-     (t-run "mcp" (test-mcp))))
+     (t-run "mcp" (test-mcp)) (t-run "stdio" (test-stdio))))

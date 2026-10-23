@@ -15,6 +15,7 @@ kotoba/kumitate/55-out.kotoba
 kotoba/kumitate/60-api.kotoba
 kotoba/kumitate/70-mcp.kotoba
 kotoba/kumitate/80-http.kotoba
+kotoba/kumitate/85-stdio.kotoba
 kotoba/kumitate/90-cli.kotoba
 kotoba/kumitate/tests/t-units.kotoba
 kotoba/kumitate/tests/t-gate.kotoba
