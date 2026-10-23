@@ -1,0 +1,30 @@
+;; kumitate CircleCI 互換 dapp -- aiueos アプリ記述子（形は app-itonami-dandori の
+;; aiueos/dandori.edn と cloud-itonami/kaikei の aiueos/kaikei.edn に準拠）。
+;; 実装の正本: kotoba/kumitate/*.kotoba と docs/aiueos-dapp.md。
+;;
+;; 判断コアは kotoba/kumitate の pure module（10-text から 70-mcp まで）。
+;; config の検証・展開・API v2 の形・実行記録と JUnit の集計は計算だけで、
+;; :effects #{} である。I/O（ファイル、TCP、画面）はこの外の層（80-http、
+;; 90-cli、将来のブラウザ層）が持つ。
+;; wasm の産物は無い: amu selfhost に wasm32-browser target が無い
+;; （kotoba-lang/amu#1515）。今の産物は native static image（docs/evidence）。
+;; aiueos session/grant への配線は未実装（docs/aiueos-dapp.md の未実装境界）。
+{:aiueos/component :app/kumitate
+ :aiueos/kind :app
+ :aiueos/trust :untrusted
+ :aiueos/source "kotoba/kumitate/GATE-MANIFEST"
+ :aiueos/wasm nil
+ :aiueos/entry "main"
+ :aiueos/args []
+ :aiueos/imports #{}
+ :aiueos/exports #{:app/main
+                   :app/validate
+                   :app/plan
+                   :app/process
+                   :app/api-shapes
+                   :app/local-plan
+                   :app/runs
+                   :app/runs-export
+                   :app/junit}
+ :aiueos/effects #{}
+ :aiueos/limits {:memory-pages 256 :fuel 50000000}}

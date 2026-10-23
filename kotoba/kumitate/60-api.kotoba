@@ -1,0 +1,347 @@
+;; 60-api (prefix ap-): CircleCI API v2 shapes, run records and JUnit reports.
+;; The status enums are kotoba-lang/com-circleci manifest.json's (verified
+;; against https://circleci.com/api/v2/openapi.json):
+;;   Pipeline.state  created errored setup-pending setup pending
+;;   Workflow.status success canceled error failed failing not_run on_hold
+;;                   running unauthorized
+;;   Job.status      success running not_run failed retried queued not_running
+;;                   infrastructure_fail timedout on_hold terminated-unknown
+;;                   blocked canceled unauthorized
+;; Nothing here talks to circleci.com: shapes are made from a plan, and run
+;; records and reports are read from text the user already holds.
+;; Refused by name: runs/not-json (with the json/* code), runs/shape,
+;; runs/unknown-status, runs/bad-time, junit/not-xml (with the xml/* code),
+;; junit/shape, junit/empty.
+
+(defn ap-strs-of [csv :string] [:list :string] (tx-split csv " "))
+(defn ap-pipeline-states [] [:list :string] (ap-strs-of "created errored setup-pending setup pending"))
+(defn ap-workflow-statuses [] [:list :string] (ap-strs-of "success canceled error failed failing not_run on_hold running unauthorized"))
+(defn ap-job-statuses [] [:list :string]
+  (ap-strs-of "success running not_run failed retried queued not_running infrastructure_fail timedout on_hold terminated-unknown blocked canceled unauthorized"))
+(defn ap-failed-status? [s :string] :bool
+  (or (tx-eq s "failed") (tx-eq s "infrastructure_fail") (tx-eq s "timedout") (tx-eq s "error") (tx-eq s "failing")))
+
+;; ---------------------------------------------------------------------------
+;; Deterministic ids and times
+
+;; FNV-1a 64 of s (wrapping)
+(defn ap-fnv [s :string seed :i64] :i64
+  (loop [i 0 h (bit-xor -3750763034362895579 seed)]
+    (if (>= i (tx-len s)) h
+      (let [c (tx-cp s i)] (recur (+ i (tx-w c)) (* (bit-xor h (bit-and c 255)) 1099511628211))))))
+(defn ap-hex [h :i64 digits :i64] :string
+  (loop [k (- digits 1) acc ""]
+    (if (< k 0) acc (recur (- k 1) (tx-cat acc (tx-hexdig (bit-and (u64-shift-right h (* 4 k)) 15)))))))
+;; a UUID-shaped id that is a pure function of s (version nibble 4, variant 8)
+(defn ap-uuid [s :string] :string
+  (let [a (ap-fnv s 0) b (ap-fnv s 7046029254386353131)]
+    (tx-cat5 (ap-hex (u64-shift-right a 32) 8) "-" (ap-hex (u64-shift-right a 16) 4)
+             (tx-cat3 "-4" (ap-hex a 3) "-")
+             (tx-cat4 "8" (ap-hex (u64-shift-right b 48) 3) "-" (ap-hex b 12)))))
+
+;; days from 1970-01-01 to y-m-d (proleptic Gregorian)
+(defn ap-days [y0 :i64 m :i64 d :i64] :i64
+  (let [y (if (<= m 2) (- y0 1) y0)
+        era (quot (if (>= y 0) y (- y 399)) 400)
+        yoe (- y (* era 400))
+        mp (if (> m 2) (- m 3) (+ m 9))
+        doy (+ (quot (+ (* 153 mp) 2) 5) (- d 1))
+        doe (+ (* yoe 365) (quot yoe 4) (- 0 (quot yoe 100)) doy)]
+    (+ (* era 146097) doe -719468)))
+(defn ap-num [s :string a :i64 n :i64] :i64
+  (if (> (+ a n) (tx-len s)) -1
+    (loop [k 0 v 0] (cond (>= k n) v (tx-digit? (tx-cp s (+ a k))) (recur (+ k 1) (+ (* v 10) (- (tx-cp s (+ a k)) 48))) :else -1))))
+;; ISO-8601 (YYYY-MM-DDTHH:MM:SS[.fff](Z|+hh:mm|-hh:mm)) -> epoch milliseconds, or -1
+(defn ap-iso-ms [s :string] :i64
+  (let [y (ap-num s 0 4) mo (ap-num s 5 2) d (ap-num s 8 2) h (ap-num s 11 2) mi (ap-num s 14 2) se (ap-num s 17 2)
+        ok (and (>= (tx-len s) 20) (= (tx-cp s 4) 45) (= (tx-cp s 7) 45) (or (= (tx-cp s 10) 84) (= (tx-cp s 10) 32))
+                (= (tx-cp s 13) 58) (= (tx-cp s 16) 58) (>= y 0) (>= mo 1) (<= mo 12) (>= d 1) (<= d 31)
+                (>= h 0) (<= h 23) (>= mi 0) (<= mi 59) (>= se 0) (<= se 60))
+        ;; fraction
+        fe (if (and ok (< 19 (tx-len s)) (= (tx-cp s 19) 46))
+             (loop [k 20] (if (and (< k (tx-len s)) (tx-digit? (tx-cp s k))) (recur (+ k 1)) k)) 19)
+        ms (if (> fe 20) (let [n (min 3 (- fe 20)) v (ap-num s 20 n)] (cond (= n 1) (* v 100) (= n 2) (* v 10) :else v)) 0)
+        z (if (< fe (tx-len s)) (tx-from s fe) "")
+        off (cond (tx-eq z "Z") 0
+                  (and (= (tx-len z) 6) (or (= (tx-cp z 0) 43) (= (tx-cp z 0) 45)) (= (tx-cp z 3) 58))
+                    (let [oh (ap-num z 1 2) om (ap-num z 4 2)]
+                      (if (or (< oh 0) (< om 0)) -99999 (* (if (= (tx-cp z 0) 45) -1 1) (+ (* oh 60) om))))
+                  :else -99999)]
+    (if (or (not ok) (= off -99999)) -1
+      (- (+ (* (+ (* (+ (* (ap-days y mo d) 24) h) 60) mi) 60000) (* se 1000) ms) (* off 60000)))))
+(defn ap-pad2 [n :i64] :string (if (< n 10) (tx-cat "0" (tx-istr n)) (tx-istr n)))
+;; epoch milliseconds -> YYYY-MM-DDTHH:MM:SS.mmmZ
+(defn ap-ms-iso [ms :i64] :string
+  (let [days (quot (if (>= ms 0) ms (- ms 86399999)) 86400000)
+        rem (- ms (* days 86400000))
+        z (+ days 719468)
+        era (quot (if (>= z 0) z (- z 146096)) 146097)
+        doe (- z (* era 146097))
+        yoe (quot (- (+ (- doe (quot doe 1460)) (quot doe 36524)) (quot doe 146096)) 365)
+        doy (- doe (- (+ (* 365 yoe) (quot yoe 4)) (quot yoe 100)))
+        mp (quot (+ (* 5 doy) 2) 153)
+        d (+ (- doy (quot (+ (* 153 mp) 2) 5)) 1)
+        m (if (< mp 10) (+ mp 3) (- mp 9))
+        y (+ yoe (* era 400) (if (<= m 2) 1 0))
+        msr (- rem (* (quot rem 1000) 1000))]
+    (tx-cat5 (tx-istr y) "-" (ap-pad2 m) "-" (tx-cat5 (ap-pad2 d) "T" (ap-pad2 (quot rem 3600000)) ":"
+             (tx-cat5 (ap-pad2 (- (quot rem 60000) (* 60 (quot rem 3600000)))) ":" (ap-pad2 (- (quot rem 1000) (* 60 (quot rem 60000))))
+                      "." (tx-cat (tx-sub (tx-istr (+ 1000 msr)) 1 4) "Z"))))))
+
+;; ---------------------------------------------------------------------------
+;; A plan as the API v2 objects CircleCI shows when the pipeline is created
+
+(defn ap-null-or [s :string] [:ref :kumitate/Y] (if (tx-empty? s) (y-null) (y-str s)))
+(defn ap-shapes [pr [:ref :kumitate/PR] inputs [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (let [slug (if (tx-empty? (:text (y-get inputs "project_slug"))) "gh/example/project" (:text (y-get inputs "project_slug")))
+        number (if (y-intv? (y-get inputs "number")) (tx-int (:text (y-get inputs "number"))) 1)
+        created (if (> (ap-iso-ms (:text (y-get inputs "created_at"))) 0) (:text (y-get inputs "created_at")) "1970-01-01T00:00:00.000Z")
+        seed (tx-cat4 slug "#" (tx-istr number) created)
+        pid (ap-uuid (tx-cat "pipeline:" seed))
+        errs (loop [i 0 acc (y-seq)]
+               (if (>= i (count (:diags pr))) acc
+                 (let [d (nth (:diags pr) i)]
+                   (recur (+ i 1) (if (= (:level d) 2)
+                                    (y-add acc (-> (y-map) (y-put "type" (y-str "config")) (y-put "message" (y-str (tx-cat3 (:code d) " " (tx-cat3 (:path d) ": " (:msg d)))))))
+                                    acc)))))
+        vcs (-> (y-map) (y-put "provider_name" (y-str "GitHub")) (y-put-some "branch" (ap-null-or (:branch pr))) (y-put-some "tag" (ap-null-or (:tag pr))))
+        pipeline (-> (y-map) (y-put "id" (y-str pid)) (y-put "errors" errs) (y-put "project_slug" (y-str slug))
+                     (y-put "updated_at" (y-str created)) (y-put "number" (y-int number))
+                     (y-put "trigger_parameters" (:params pr))
+                     (y-put "state" (y-str (if (> (y-n errs) 0) "errored" "created"))) (y-put "created_at" (y-str created))
+                     (y-put "trigger" (-> (y-map) (y-put "type" (y-str "explicit")) (y-put "received_at" (y-str created))
+                                          (y-put "actor" (-> (y-map) (y-put "login" (y-str "kumitate")) (y-put "avatar_url" (y-null))))))
+                     (y-put "vcs" vcs))
+        wfs (loop [i 0 acc (y-seq)]
+              (if (>= i (count (:workflows pr))) acc
+                (let [w (nth (:workflows pr) i)]
+                  (recur (+ i 1)
+                    (if (not (:run w)) acc
+                      (let [wid (ap-uuid (tx-cat3 "workflow:" seed (:name w)))
+                            jobs (loop [k 0 ja (y-seq)]
+                                   (if (>= k (count (:jobs w))) ja
+                                     (let [ji (nth (:jobs w) k)]
+                                       (recur (+ k 1)
+                                         (if (not (:run ji)) ja
+                                           (let [deps (loop [q 0 ds (y-seq)]
+                                                        (if (>= q (vector-count (:deps ji))) ds
+                                                          (recur (+ q 1) (y-add ds (y-str (ap-uuid (tx-cat3 "job:" (tx-cat seed (:name w)) (:name (nth (:jobs w) (vector-at (:deps ji) q))))))))))
+                                                 approval (tx-eq (:type ji) "approval")
+                                                 jid (ap-uuid (tx-cat3 "job:" (tx-cat seed (:name w)) (:name ji)))
+                                                 j0 (-> (y-map) (y-put "dependencies" deps) (y-put "job_number" (y-null)) (y-put "id" (y-str jid))
+                                                        (y-put "started_at" (y-null)) (y-put "name" (y-str (:name ji))) (y-put "project_slug" (y-str slug))
+                                                        (y-put "status" (y-str (cond (> (y-n deps) 0) "blocked" approval "on_hold" :else "not_running")))
+                                                        (y-put "type" (y-str (if approval "approval" "build"))) (y-put "stopped_at" (y-null)))]
+                                             (y-add ja (if approval (y-put j0 "approval_request_id" (y-str jid)) j0))))))))]
+                        (y-add acc (-> (y-map) (y-put "pipeline_id" (y-str pid)) (y-put "id" (y-str wid)) (y-put "name" (y-str (:name w)))
+                                       (y-put "project_slug" (y-str slug)) (y-put "status" (y-str "running"))
+                                       (y-put "started_by" (y-str "kumitate")) (y-put "pipeline_number" (y-int number))
+                                       (y-put "created_at" (y-str created)) (y-put "stopped_at" (y-null))
+                                       (y-put "jobs" (-> (y-map) (y-put "items" jobs) (y-put "next_page_token" (y-null))))))))))))]
+    (-> (y-map)
+        (y-put "kumitate" (-> (y-map) (y-put "projection" (y-str "created")) (y-put "executes" (y-bool false))
+                              (y-put "note" (y-str "The objects CircleCI shows when this pipeline is created; ids are derived from project_slug, number and created_at. Nothing was sent to circleci.com."))))
+        (y-put "pipeline" pipeline)
+        (y-put "workflows" (-> (y-map) (y-put "items" wfs) (y-put "next_page_token" (y-null)))))))
+
+;; ---------------------------------------------------------------------------
+;; Run records
+
+;; normalized: {schema, workflows: [..], jobs: [..]} with only known keys
+(defn ap-wf-norm [w [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (-> (y-map) (y-put "id" (y-str (:text (y-get w "id")))) (y-put "name" (y-str (:text (y-get w "name"))))
+      (y-put "status" (y-str (:text (y-get w "status"))))
+      (y-put "pipeline_number" (if (y-intv? (y-get w "pipeline_number")) (y-get w "pipeline_number") (y-null)))
+      (y-put "created_at" (y-get w "created_at")) (y-put "stopped_at" (y-get w "stopped_at"))))
+(defn ap-job-norm [j [:ref :kumitate/Y] wid :string] [:ref :kumitate/Y]
+  (-> (y-map) (y-put "id" (y-str (:text (y-get j "id")))) (y-put "name" (y-str (:text (y-get j "name"))))
+      (y-put "status" (y-str (:text (y-get j "status")))) (y-put "type" (y-str (if (y-has? j "type") (:text (y-get j "type")) "build")))
+      (y-put "job_number" (if (y-intv? (y-get j "job_number")) (y-get j "job_number") (y-null)))
+      (y-put "workflow_id" (if (tx-empty? wid) (if (y-scalar? (y-get j "workflow_id")) (y-str (:text (y-get j "workflow_id"))) (y-null)) (y-str wid)))
+      (y-put "started_at" (y-get j "started_at")) (y-put "stopped_at" (y-get j "stopped_at"))))
+(defn ap-is-job? [x [:ref :kumitate/Y]] :bool (or (y-has? x "job_number") (y-has? x "dependencies") (y-has? x "workflow_id")))
+(defn ap-items [x [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (cond (y-seq? x) x (y-map? x) (if (y-seq? (y-get x "items")) (y-get x "items") (y-seq)) :else (y-seq)))
+;; any accepted input -> the normalized record, in XR (diags on refusal)
+(defn ap-runs-read [text :string] [:ref :kumitate/XR]
+  (let [r (js-parse text)]
+    (if (not (tx-empty? (:err r))) (pl-xr (y-null) (conj (d-list) (d-err "runs/not-json" (tx-cat "at byte " (tx-istr (:pos r))) (:err r))))
+      (let [x (:node r)
+            ;; collect workflows and jobs from the accepted shapes
+            wfs0 (cond (tx-eq (:text (y-get x "schema")) "kumitate.runs.v1") (y-get x "workflows")
+                       (y-has? x "workflows") (ap-items (y-get x "workflows"))
+                       (and (y-has? x "items") (> (y-n (ap-items x)) 0) (not (ap-is-job? (y-at (ap-items x) 0)))) (ap-items x)
+                       :else (y-seq))
+            jobs0 (cond (tx-eq (:text (y-get x "schema")) "kumitate.runs.v1") (y-get x "jobs")
+                        (y-has? x "jobs") (ap-items (y-get x "jobs"))
+                        (and (y-has? x "items") (> (y-n (ap-items x)) 0) (ap-is-job? (y-at (ap-items x) 0))) (ap-items x)
+                        :else (y-seq))
+            ;; workflows may carry their jobs ({jobs: {items}} as ap-shapes writes them)
+            nested (loop [i 0 acc (y-seq)]
+                     (if (>= i (y-n wfs0)) acc
+                       (let [w (y-at wfs0 i) js (ap-items (y-get w "jobs"))]
+                         (recur (+ i 1) (loop [k 0 a2 acc] (if (< k (y-n js)) (recur (+ k 1) (y-add a2 (ap-job-norm (y-at js k) (:text (y-get w "id"))))) a2))))))
+            wfs (loop [i 0 acc (y-seq)] (if (< i (y-n wfs0)) (recur (+ i 1) (y-add acc (ap-wf-norm (y-at wfs0 i)))) acc))
+            jobs (loop [i 0 acc nested] (if (< i (y-n jobs0)) (recur (+ i 1) (y-add acc (ap-job-norm (y-at jobs0 i) ""))) acc))
+            ds (-> (if (and (= (y-n wfs) 0) (= (y-n jobs) 0))
+                     (conj (d-list) (d-err "runs/shape" "" "no workflows or jobs: pass kumitate.runs.v1, an API v2 items page, or {workflows, jobs}"))
+                     (d-list))
+                   (d-cat (ap-check-statuses wfs "workflows" (ap-workflow-statuses)))
+                   (d-cat (ap-check-statuses jobs "jobs" (ap-job-statuses)))
+                   (d-cat (ap-check-times wfs "workflows" "created_at" "stopped_at"))
+                   (d-cat (ap-check-times jobs "jobs" "started_at" "stopped_at")))]
+        (pl-xr (-> (y-map) (y-put "schema" (y-str "kumitate.runs.v1")) (y-put "workflows" wfs) (y-put "jobs" jobs)) ds)))))
+(defn ap-check-statuses [xs [:ref :kumitate/Y] p :string allowed [:list :string]] [:list [:ref :kumitate/D]]
+  (loop [i 0 ds (d-list)]
+    (if (>= i (y-n xs)) ds
+      (let [s (:text (y-get (y-at xs i) "status"))]
+        (recur (+ i 1) (if (tx-member? allowed s) ds
+                         (conj ds (d-err "runs/unknown-status" (cf-pathi p i) (tx-cat3 "`" s "` is not a CircleCI API v2 status")))))))))
+(defn ap-check-times [xs [:ref :kumitate/Y] p :string a :string b :string] [:list [:ref :kumitate/D]]
+  (loop [i 0 ds (d-list)]
+    (if (>= i (y-n xs)) ds
+      (let [x (y-at xs i)]
+        (recur (+ i 1) (if (or (ap-bad-time? (y-get x a)) (ap-bad-time? (y-get x b)))
+                         (conj ds (d-err "runs/bad-time" (cf-pathi p i) "a time is ISO-8601 or null"))
+                         ds))))))
+(defn ap-bad-time? [v [:ref :kumitate/Y]] :bool (and (not (y-null? v)) (< (ap-iso-ms (:text v)) 0)))
+(defn ap-duration-ms [x [:ref :kumitate/Y] a :string b :string] :i64
+  (let [s (y-get x a) e (y-get x b)]
+    (if (or (y-null? s) (y-null? e)) -1
+      (let [d (- (ap-iso-ms (:text e)) (ap-iso-ms (:text s)))] (if (< d 0) -1 d)))))
+
+;; a summary of a normalized record
+(defn ap-runs-summary [rec [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (let [jobs (y-get rec "jobs") wfs (y-get rec "workflows")
+        names (loop [i 0 acc (tx-strs)] (if (>= i (y-n jobs)) acc (recur (+ i 1) (let [n (:text (y-get (y-at jobs i) "name"))] (if (tx-member? acc n) acc (conj acc n))))))
+        counts (loop [k 0 acc (y-map)]
+                 (if (>= k (count (ap-job-statuses))) acc
+                   (let [st (nth (ap-job-statuses) k)
+                         c (loop [i 0 c 0] (if (< i (y-n jobs)) (recur (+ i 1) (if (tx-eq (:text (y-get (y-at jobs i) "status")) st) (+ c 1) c)) c))]
+                     (recur (+ k 1) (if (> c 0) (y-put acc st (y-int c)) acc)))))
+        failed (loop [i 0 acc (y-seq)]
+                 (if (>= i (y-n jobs)) acc
+                   (let [j (y-at jobs i)]
+                     (recur (+ i 1) (if (ap-failed-status? (:text (y-get j "status")))
+                                      (y-add acc (-> (y-map) (y-put "name" (y-get j "name")) (y-put "status" (y-get j "status"))
+                                                     (y-put "job_number" (y-get j "job_number")) (y-put "workflow_id" (y-get j "workflow_id"))))
+                                      acc)))))
+        per (loop [k 0 acc (y-seq)]
+              (if (>= k (count names)) acc
+                (let [nm (nth names k)
+                      tally (loop [i 0 runs 0 ok 0 bad 0 dsum 0 dn 0]
+                              (if (>= i (y-n jobs)) [runs ok bad dsum dn]
+                                (let [j (y-at jobs i) st (:text (y-get j "status")) d (ap-duration-ms j "started_at" "stopped_at")]
+                                  (if (not (tx-eq (:text (y-get j "name")) nm)) (recur (+ i 1) runs ok bad dsum dn)
+                                    (recur (+ i 1) (+ runs 1) (if (tx-eq st "success") (+ ok 1) ok) (if (ap-failed-status? st) (+ bad 1) bad)
+                                           (if (>= d 0) (+ dsum d) dsum) (if (>= d 0) (+ dn 1) dn))))))
+                      runs (vector-at tally 0) ok (vector-at tally 1) bad (vector-at tally 2)
+                      dn (vector-at tally 4)]
+                  (recur (+ k 1)
+                    (y-add acc (-> (y-map) (y-put "name" (y-str nm)) (y-put "runs" (y-int runs)) (y-put "success" (y-int ok)) (y-put "failed" (y-int bad))
+                                   (y-put "success_permille" (y-int (if (> runs 0) (quot (* ok 1000) runs) 0)))
+                                   (y-put "mean_duration_ms" (if (> dn 0) (y-int (quot (vector-at tally 3) dn)) (y-null)))
+                                   (y-put "flaky" (y-bool (and (> ok 0) (> bad 0))))))))))
+        wcounts (loop [k 0 acc (y-map)]
+                  (if (>= k (count (ap-workflow-statuses))) acc
+                    (let [st (nth (ap-workflow-statuses) k)
+                          c (loop [i 0 c 0] (if (< i (y-n wfs)) (recur (+ i 1) (if (tx-eq (:text (y-get (y-at wfs i) "status")) st) (+ c 1) c)) c))]
+                      (recur (+ k 1) (if (> c 0) (y-put acc st (y-int c)) acc)))))]
+    (-> (y-map) (y-put "workflows" (y-int (y-n wfs))) (y-put "jobs" (y-int (y-n jobs)))
+        (y-put "workflow_status" wcounts) (y-put "job_status" counts) (y-put "failed_jobs" failed)
+        (y-put "by_job" per)
+        (y-put "flaky_jobs" (loop [i 0 acc (y-seq)] (if (>= i (y-n per)) acc (recur (+ i 1) (if (y-true? (y-get (y-at per i) "flaky")) (y-add acc (y-get (y-at per i) "name")) acc))))))))
+;; the record as CircleCI API v2 pages
+(defn ap-runs-items [rec [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (-> (y-map) (y-put "workflows" (-> (y-map) (y-put "items" (y-get rec "workflows")) (y-put "next_page_token" (y-null))))
+      (y-put "jobs" (-> (y-map) (y-put "items" (y-get rec "jobs")) (y-put "next_page_token" (y-null))))))
+
+;; ---------------------------------------------------------------------------
+;; JUnit
+
+;; "1.25" seconds -> 1250 ms; -1 when not a number
+(defn ap-sec-ms [t :string] :i64
+  (if (not (js-number? t)) -1
+    (let [dot (string-index-of t ".")
+          whole (if (< dot 0) t (tx-sub t 0 dot))
+          frac (if (< dot 0) "" (tx-from t (+ dot 1)))
+          f3 (tx-sub (tx-cat frac "000") 0 3)]
+      (if (or (tx-has? t "e") (tx-has? t "E") (tx-starts? t "-")) -1
+        (+ (* (tx-int whole) 1000) (tx-int f3))))))
+;; every testcase under el, as {key, classname, name, ms, result, message}
+(defn ap-cases [el [:ref :kumitate/Y] acc0 [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (loop [i 0 acc acc0]
+    (if (>= i (y-n el)) acc
+      (let [k (y-key el i) c (y-at el i)]
+        (cond (not (tx-eq k "<>")) (recur (+ i 1) acc)
+              (tx-eq (:text c) "testcase")
+                (let [fail (xm-children c "failure") err (xm-children c "error") skip (xm-children c "skipped")
+                      result (cond (> (count fail) 0) "failed" (> (count err) 0) "error" (> (count skip) 0) "skipped" :else "passed")
+                      m (cond (> (count fail) 0) (nth fail 0) (> (count err) 0) (nth err 0) :else (y-null))
+                      msg (cond (y-null? m) "" (not (tx-empty? (xm-attr m "message"))) (xm-attr m "message") :else (xm-attr m "#text"))
+                      cn (xm-attr c "classname") nm (xm-attr c "name")]
+                  (recur (+ i 1) (y-add acc (-> (y-map) (y-put "key" (y-str (tx-cat3 cn "#" nm))) (y-put "classname" (y-str cn)) (y-put "name" (y-str nm))
+                                                (y-put "ms" (y-int (ap-sec-ms (xm-attr c "time")))) (y-put "result" (y-str result))
+                                                (y-put "message" (y-str (let [nl (string-index-of msg "\n")] (if (< nl 0) msg (tx-sub msg 0 nl)))))))))
+              :else (recur (+ i 1) (ap-cases c acc)))))))
+(defn ap-count [cases [:ref :kumitate/Y] result :string] :i64
+  (loop [i 0 n 0] (if (< i (y-n cases)) (recur (+ i 1) (if (tx-eq (:text (y-get (y-at cases i) "result")) result) (+ n 1) n)) n)))
+;; reports: the XML texts, one a run
+(defn ap-junit [reports [:list :string]] [:ref :kumitate/XR]
+  (if (= (count reports) 0) (pl-xr (y-null) (conj (d-list) (d-err "junit/empty" "reports" "no report")))
+    (loop [r 0 all (y-seq) per (y-seq) ds (d-list)]
+      (if (< r (count reports))
+        (let [x (xm-parse (nth reports r)) p (cf-pathi "reports" r)]
+          (cond (not (tx-empty? (:err x))) (recur (+ r 1) all per (conj ds (d-err "junit/not-xml" p (tx-cat3 (:err x) " at byte " (tx-istr (:pos x))))))
+                (not (or (tx-eq (:text (:node x)) "testsuites") (tx-eq (:text (:node x)) "testsuite")))
+                  (recur (+ r 1) all per (conj ds (d-err "junit/shape" p (tx-cat3 "root element `" (:text (:node x)) "` is not testsuites or testsuite"))))
+                :else
+                  (let [root (:node x)
+                        cases (if (tx-eq (:text root) "testsuite") (ap-cases (y-put (y-new 6 "" 0) "<>" root) (y-seq)) (ap-cases root (y-seq)))
+                        ms (loop [i 0 t 0] (if (< i (y-n cases)) (recur (+ i 1) (+ t (max 0 (tx-int (:text (y-get (y-at cases i) "ms")))))) t))
+                        tagged (loop [i 0 acc all] (if (< i (y-n cases)) (recur (+ i 1) (y-add acc (y-put (y-at cases i) "report" (y-int r)))) acc))]
+                    (recur (+ r 1) tagged
+                           (y-add per (-> (y-map) (y-put "tests" (y-int (y-n cases))) (y-put "passed" (y-int (ap-count cases "passed")))
+                                          (y-put "failed" (y-int (ap-count cases "failed"))) (y-put "errors" (y-int (ap-count cases "error")))
+                                          (y-put "skipped" (y-int (ap-count cases "skipped"))) (y-put "time_ms" (y-int ms))))
+                           ds))))
+        (if (> (d-errors ds) 0) (pl-xr (y-null) ds)
+          (pl-xr (ap-junit-agg all per) ds))))))
+(defn ap-junit-agg [all [:ref :kumitate/Y] per [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (let [keys (loop [i 0 acc (tx-strs)] (if (>= i (y-n all)) acc (recur (+ i 1) (let [k (:text (y-get (y-at all i) "key"))] (if (tx-member? acc k) acc (conj acc k))))))
+        rows (loop [k 0 acc (y-seq)]
+               (if (>= k (count keys)) acc
+                 (let [key (nth keys k)
+                       t (loop [i 0 pass 0 fail 0 maxms -1 msg "" cn "" nm ""]
+                           (if (>= i (y-n all)) (-> (y-map) (y-put "test" (y-str key)) (y-put "classname" (y-str cn)) (y-put "name" (y-str nm))
+                                                    (y-put "passed" (y-int pass)) (y-put "failed" (y-int fail)) (y-put "max_ms" (y-int maxms))
+                                                    (y-put "last_message" (y-str msg)))
+                             (let [c (y-at all i) res (:text (y-get c "result"))]
+                               (if (not (tx-eq (:text (y-get c "key")) key)) (recur (+ i 1) pass fail maxms msg cn nm)
+                                 (recur (+ i 1) (if (tx-eq res "passed") (+ pass 1) pass)
+                                        (if (or (tx-eq res "failed") (tx-eq res "error")) (+ fail 1) fail)
+                                        (max maxms (tx-int (:text (y-get c "ms"))))
+                                        (if (or (tx-eq res "failed") (tx-eq res "error")) (:text (y-get c "message")) msg)
+                                        (:text (y-get c "classname")) (:text (y-get c "name")))))))]
+                   (recur (+ k 1) (y-add acc t)))))
+        failing (loop [i 0 acc (y-seq)] (if (>= i (y-n rows)) acc (recur (+ i 1) (let [r (y-at rows i)] (if (> (tx-int (:text (y-get r "failed"))) 0) (y-add acc (y-del (y-del r "max_ms") "passed")) acc)))))
+        flaky (loop [i 0 acc (y-seq)]
+                (if (>= i (y-n rows)) acc
+                  (recur (+ i 1) (let [r (y-at rows i)]
+                                   (if (and (> (tx-int (:text (y-get r "failed"))) 0) (> (tx-int (:text (y-get r "passed"))) 0))
+                                     (y-add acc (-> (y-map) (y-put "test" (y-get r "test")) (y-put "passed" (y-get r "passed")) (y-put "failed" (y-get r "failed"))))
+                                     acc)))))
+        ;; ten slowest by their longest run
+        slow (loop [n 0 acc (y-seq) used (tx-strs)]
+               (if (or (>= n 10) (>= n (y-n rows))) acc
+                 (let [best (loop [i 0 b -1]
+                              (if (>= i (y-n rows)) b
+                                (let [r (y-at rows i)]
+                                  (recur (+ i 1) (if (and (not (tx-member? used (:text (y-get r "test"))))
+                                                          (>= (tx-int (:text (y-get r "max_ms"))) 0)
+                                                          (or (< b 0) (> (tx-int (:text (y-get r "max_ms"))) (tx-int (:text (y-get (y-at rows b) "max_ms"))))))
+                                                   i b)))))]
+                   (if (< best 0) acc
+                     (recur (+ n 1) (y-add acc (-> (y-map) (y-put "test" (y-get (y-at rows best) "test")) (y-put "max_ms" (y-get (y-at rows best) "max_ms"))))
+                            (conj used (:text (y-get (y-at rows best) "test"))))))))]
+    (-> (y-map) (y-put "reports" per) (y-put "tests" (y-int (count keys))) (y-put "failing" failing) (y-put "flaky" flaky) (y-put "slowest" slow))))

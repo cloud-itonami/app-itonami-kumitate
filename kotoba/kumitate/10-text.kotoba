@@ -1,0 +1,199 @@
+;; 10-text (prefix tx-): strings, numbers, lists, and the Y / D constructors.
+;; Strings are UTF-8; offsets are bytes and every scan steps a whole code point.
+
+(defn tx-cp [s :string i :i64] :i64 (string-code-point-at s i))
+(defn tx-w [cp :i64] :i64
+  (cond (< cp 128) 1 (< cp 2048) 2 (< cp 65536) 3 :else 4))
+(defn tx-len [s :string] :i64 (string-length s))
+(defn tx-sub [s :string a :i64 b :i64] :string (string-substring s a b))
+(defn tx-from [s :string a :i64] :string (string-substring s a (string-length s)))
+(defn tx-cat [a :string b :string] :string (string-concat a b))
+(defn tx-cat3 [a :string b :string c :string] :string (string-concat a (string-concat b c)))
+(defn tx-cat4 [a :string b :string c :string d :string] :string
+  (string-concat a (string-concat b (string-concat c d))))
+(defn tx-cat5 [a :string b :string c :string d :string e :string] :string
+  (string-concat a (string-concat b (string-concat c (string-concat d e)))))
+(defn tx-eq [a :string b :string] :bool (string=? a b))
+(defn tx-istr [n :i64] :string (string-from-i64 n))
+(defn tx-empty? [s :string] :bool (= (string-length s) 0))
+
+(defn tx-starts? [s :string p :string] :bool
+  (and (>= (string-length s) (string-length p))
+       (string=? (string-substring s 0 (string-length p)) p)))
+(defn tx-ends? [s :string p :string] :bool
+  (and (>= (string-length s) (string-length p))
+       (string=? (string-substring s (- (string-length s) (string-length p)) (string-length s)) p)))
+
+;; first byte offset >= from where needle starts, or -1
+(defn tx-index-from [s :string needle :string from :i64] :i64
+  (if (> from (string-length s)) -1
+    (let [r (string-index-of (string-substring s from (string-length s)) needle)]
+      (if (< r 0) -1 (+ r from)))))
+(defn tx-has? [s :string needle :string] :bool (>= (string-index-of s needle) 0))
+
+(defn tx-space? [c :i64] :bool (or (= c 32) (= c 9)))
+(defn tx-digit? [c :i64] :bool (and (>= c 48) (<= c 57)))
+(defn tx-alpha? [c :i64] :bool (or (and (>= c 65) (<= c 90)) (and (>= c 97) (<= c 122))))
+
+;; first offset in [a, b) that is not a space or tab, or b
+(defn tx-skip-sp [s :string a :i64 b :i64] :i64
+  (loop [i a] (if (and (< i b) (tx-space? (tx-cp s i))) (recur (+ i 1)) i)))
+;; one past the last offset in [a, b) that is not a space or tab, or a
+(defn tx-rtrim-at [s :string a :i64 b :i64] :i64
+  (loop [e b] (if (and (> e a) (tx-space? (tx-cp s (- e 1)))) (recur (- e 1)) e)))
+(defn tx-trim [s :string] :string
+  (let [a (tx-skip-sp s 0 (string-length s)) e (tx-rtrim-at s a (string-length s))]
+    (string-substring s a e)))
+
+(defn tx-replace-all [s :string from :string to :string] :string
+  (loop [i 0 acc ""]
+    (let [j (tx-index-from s from i)]
+      (if (< j 0)
+        (string-concat acc (string-substring s i (string-length s)))
+        (recur (+ j (string-length from)) (tx-cat3 acc (string-substring s i j) to))))))
+
+;; decimal integer: optional sign, digits only; tx-int? says whether it parses
+(defn tx-int? [s :string] :bool
+  (let [n (string-length s) a (if (and (> n 0) (or (= (tx-cp s 0) 45) (= (tx-cp s 0) 43))) 1 0)]
+    (and (> n a) (< (- n a) 19)
+         (loop [i a] (cond (>= i n) true (tx-digit? (tx-cp s i)) (recur (+ i 1)) :else false)))))
+(defn tx-int [s :string] :i64
+  (let [n (string-length s) neg (and (> n 0) (= (tx-cp s 0) 45))
+        a (if (and (> n 0) (or (= (tx-cp s 0) 45) (= (tx-cp s 0) 43))) 1 0)
+        v (loop [i a v 0] (if (< i n) (recur (+ i 1) (+ (* v 10) (- (tx-cp s i) 48))) v))]
+    (if neg (- 0 v) v)))
+
+;; the code point as UTF-8 text
+(defn tx-utf8 [cp :i64] :string
+  (string-from-utf8 (bytes-from-vector-i64
+    (cond (< cp 128) [cp]
+          (< cp 2048) [(+ 192 (i64-shift-right cp 6)) (+ 128 (bit-and cp 63))]
+          (< cp 65536) [(+ 224 (i64-shift-right cp 12)) (+ 128 (bit-and (i64-shift-right cp 6) 63)) (+ 128 (bit-and cp 63))]
+          :else [(+ 240 (i64-shift-right cp 18)) (+ 128 (bit-and (i64-shift-right cp 12) 63))
+                 (+ 128 (bit-and (i64-shift-right cp 6) 63)) (+ 128 (bit-and cp 63))]))))
+(defn tx-hexdig [d :i64] :string (string-substring "0123456789abcdef" d (+ d 1)))
+(defn tx-hex-val [c :i64] :i64
+  (cond (tx-digit? c) (- c 48) (and (>= c 97) (<= c 102)) (- c 87) (and (>= c 65) (<= c 70)) (- c 55) :else -1))
+(defn tx-hex4 [n :i64] :string
+  (tx-cat4 (tx-hexdig (bit-and (i64-shift-right n 12) 15)) (tx-hexdig (bit-and (i64-shift-right n 8) 15))
+           (tx-hexdig (bit-and (i64-shift-right n 4) 15)) (tx-hexdig (bit-and n 15))))
+
+;; JSON string literal of s, with quotes
+(defn tx-json-str [s :string] :string
+  (let [n (string-length s)]
+    (loop [i 0 a 0 acc "\""]
+      (if (>= i n)
+        (tx-cat3 acc (string-substring s a n) "\"")
+        (let [c (tx-cp s i) w (tx-w c)
+              esc (cond (= c 34) "\\\"" (= c 92) "\\\\" (= c 10) "\\n" (= c 13) "\\r" (= c 9) "\\t"
+                        (< c 32) (tx-cat "\\u" (tx-hex4 c)) :else "")]
+          (if (tx-empty? esc)
+            (recur (+ i w) a acc)
+            (recur (+ i w) (+ i w) (tx-cat3 acc (string-substring s a i) esc))))))))
+
+;; lists of strings
+(defn tx-strs [] [:list :string] (typed-list-new [:list :string]))
+(defn tx-join [xs [:list :string] sep :string] :string
+  (let [n (count xs)]
+    (cond (= n 0) ""
+          (= n 1) (nth xs 0)
+          :else (let [h (quot n 2)
+                      l (loop [i 0 acc (tx-strs)] (if (< i h) (recur (+ i 1) (conj acc (nth xs i))) acc))
+                      r (loop [i h acc (tx-strs)] (if (< i n) (recur (+ i 1) (conj acc (nth xs i))) acc))]
+                  (tx-cat3 (tx-join l sep) sep (tx-join r sep))))))
+(defn tx-index-of [xs [:list :string] s :string] :i64
+  (loop [i 0] (cond (>= i (count xs)) -1 (string=? (nth xs i) s) i :else (recur (+ i 1)))))
+(defn tx-member? [xs [:list :string] s :string] :bool (>= (tx-index-of xs s) 0))
+(defn tx-split [s :string sep :string] [:list :string]
+  (loop [i 0 acc (tx-strs)]
+    (let [j (tx-index-from s sep i)]
+      (if (< j 0)
+        (conj acc (string-substring s i (string-length s)))
+        (recur (+ j (string-length sep)) (conj acc (string-substring s i j)))))))
+;; s1 < s2 by bytes
+(defn tx-less? [a :string b :string] :bool (< (string-compare a b) 0))
+(defn tx-sort [xs [:list :string]] [:list :string]
+  (loop [i 0 acc (tx-strs)]
+    (if (>= i (count xs)) acc
+      (recur (+ i 1) (tx-insert-sorted acc (nth xs i))))))
+(defn tx-insert-sorted [xs [:list :string] s :string] [:list :string]
+  (loop [i 0 acc (tx-strs) put false]
+    (cond (>= i (count xs)) (if put acc (conj acc s))
+          (and (not put) (tx-less? s (nth xs i))) (recur (+ i 1) (conj (conj acc s) (nth xs i)) true)
+          :else (recur (+ i 1) (conj acc (nth xs i)) put))))
+
+;; Y nodes
+(defn y-list [] [:list [:ref :kumitate/Y]] (typed-list-new [:list [:ref :kumitate/Y]]))
+(defn y-new [kind :i64 text :string line :i64] [:ref :kumitate/Y] (->Y kind text (tx-strs) (y-list) line))
+(defn y-null [] [:ref :kumitate/Y] (y-new 0 "" 0))
+(defn y-str [s :string] [:ref :kumitate/Y] (y-new 2 s 0))
+(defn y-plain [s :string] [:ref :kumitate/Y] (y-new 1 s 0))
+(defn y-int [n :i64] [:ref :kumitate/Y] (y-new 1 (string-from-i64 n) 0))
+(defn y-bool [b :bool] [:ref :kumitate/Y] (y-new 1 (if b "true" "false") 0))
+(defn y-map [] [:ref :kumitate/Y] (y-new 3 "" 0))
+(defn y-seq [] [:ref :kumitate/Y] (y-new 4 "" 0))
+(defn y-put [m [:ref :kumitate/Y] k :string v [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (assoc (assoc m :keys (conj (:keys m) k)) :kids (conj (:kids m) v)))
+(defn y-add [s [:ref :kumitate/Y] v [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (assoc s :kids (conj (:kids s) v)))
+(defn y-n [y [:ref :kumitate/Y]] :i64 (count (:kids y)))
+(defn y-at [y [:ref :kumitate/Y] i :i64] [:ref :kumitate/Y] (nth (:kids y) i))
+(defn y-key [y [:ref :kumitate/Y] i :i64] :string (nth (:keys y) i))
+(defn y-map? [y [:ref :kumitate/Y]] :bool (= (:kind y) 3))
+(defn y-seq? [y [:ref :kumitate/Y]] :bool (= (:kind y) 4))
+(defn y-null? [y [:ref :kumitate/Y]] :bool (= (:kind y) 0))
+(defn y-scalar? [y [:ref :kumitate/Y]] :bool (or (= (:kind y) 1) (= (:kind y) 2)))
+(defn y-index [m [:ref :kumitate/Y] k :string] :i64
+  (if (or (= (:kind m) 3) (= (:kind m) 6)) (tx-index-of (:keys m) k) -1))
+(defn y-has? [m [:ref :kumitate/Y] k :string] :bool (>= (y-index m k) 0))
+(defn y-get [m [:ref :kumitate/Y] k :string] [:ref :kumitate/Y]
+  (let [i (y-index m k)] (if (< i 0) (y-null) (nth (:kids m) i))))
+;; replace the value of k, or add it at the end
+(defn y-set [m [:ref :kumitate/Y] k :string v [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (let [i (y-index m k)]
+    (if (< i 0) (y-put m k v)
+      (loop [j 0 acc (y-list)]
+        (if (>= j (y-n m)) (assoc m :kids acc)
+          (recur (+ j 1) (conj acc (if (= j i) v (y-at m j)))))))))
+(defn y-put-some [m [:ref :kumitate/Y] k :string v [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (if (y-null? v) m (y-put m k v)))
+(defn y-del [m [:ref :kumitate/Y] k :string] [:ref :kumitate/Y]
+  (loop [j 0 out (assoc (assoc m :keys (tx-strs)) :kids (y-list))]
+    (cond (>= j (y-n m)) out
+          (string=? (y-key m j) k) (recur (+ j 1) out)
+          :else (recur (+ j 1) (y-put out (y-key m j) (y-at m j))))))
+(defn y-text [y [:ref :kumitate/Y]] :string (:text y))
+(defn y-true? [y [:ref :kumitate/Y]] :bool (and (y-scalar? y) (string=? (:text y) "true")))
+(defn y-false? [y [:ref :kumitate/Y]] :bool (and (y-scalar? y) (string=? (:text y) "false")))
+(defn y-bool? [y [:ref :kumitate/Y]] :bool (and (= (:kind y) 1) (or (y-true? y) (y-false? y))))
+(defn y-intv? [y [:ref :kumitate/Y]] :bool (and (= (:kind y) 1) (tx-int? (:text y))))
+;; structural equality
+(defn y-equal? [a [:ref :kumitate/Y] b [:ref :kumitate/Y]] :bool
+  (cond (and (y-scalar? a) (y-scalar? b)) (string=? (:text a) (:text b))
+        (not (= (:kind a) (:kind b))) false
+        (not (= (y-n a) (y-n b))) false
+        (= (:kind a) 0) true
+        :else (loop [i 0]
+                (cond (>= i (y-n a)) true
+                      (and (y-map? a) (not (string=? (y-key a i) (y-key b i)))) false
+                      (not (y-equal? (y-at a i) (y-at b i))) false
+                      :else (recur (+ i 1))))))
+
+;; diagnostics
+(defn d-list [] [:list [:ref :kumitate/D]] (typed-list-new [:list [:ref :kumitate/D]]))
+(defn d-err [code :string path :string msg :string] [:ref :kumitate/D] (->D 2 code path msg))
+(defn d-warn [code :string path :string msg :string] [:ref :kumitate/D] (->D 1 code path msg))
+(defn d-cat [a [:list [:ref :kumitate/D]] b [:list [:ref :kumitate/D]]] [:list [:ref :kumitate/D]]
+  (loop [i 0 acc a] (if (< i (count b)) (recur (+ i 1) (conj acc (nth b i))) acc)))
+(defn d-same? [a [:ref :kumitate/D] b [:ref :kumitate/D]] :bool
+  (and (= (:level a) (:level b)) (string=? (:code a) (:code b)) (string=? (:path a) (:path b)) (string=? (:msg a) (:msg b))))
+;; the diagnostics without repeats, in first-seen order
+(defn d-dedupe [ds [:list [:ref :kumitate/D]]] [:list [:ref :kumitate/D]]
+  (loop [i 0 acc (d-list)]
+    (if (>= i (count ds)) acc
+      (recur (+ i 1) (if (loop [k 0] (cond (>= k (count acc)) false (d-same? (nth acc k) (nth ds i)) true :else (recur (+ k 1))))
+                       acc (conj acc (nth ds i)))))))
+(defn d-errors [ds [:list [:ref :kumitate/D]]] :i64
+  (loop [i 0 n 0] (if (< i (count ds)) (recur (+ i 1) (if (= (:level (nth ds i)) 2) (+ n 1) n)) n)))
+(defn d-has? [ds [:list [:ref :kumitate/D]] code :string] :bool
+  (loop [i 0] (cond (>= i (count ds)) false (string=? (:code (nth ds i)) code) true :else (recur (+ i 1)))))

@@ -1,0 +1,185 @@
+;; 70-mcp (prefix mc-): the Model Context Protocol surface, as a pure function
+;; from one JSON-RPC message (text) to its answer (text, "" for a
+;; notification). The transport (80-http) only moves bytes.
+;;
+;; Methods: initialize, notifications/initialized (and every other
+;; notification: no answer), ping, tools/list, tools/call. JSON-RPC errors:
+;; -32700 parse, -32600 invalid request (batches too), -32601 unknown method,
+;; -32602 unknown tool or bad arguments. A tool that refuses its input answers
+;; isError true with the named reasons in errors[].
+;;
+;; Every tool is pure over its arguments: nothing is fetched, sent or stored.
+
+(defn mc-version [] :string "0.1.0")
+(defn mc-protocols [] [:list :string] (-> (tx-strs) (conj "2025-06-18") (conj "2025-03-26") (conj "2024-11-05")))
+(defn mc-max-input [] :i64 5242880)
+
+;; ---------------------------------------------------------------------------
+;; Tool schemas
+
+(defn ms-prop [type :string desc :string] [:ref :kumitate/Y]
+  (-> (y-map) (y-put "type" (y-str type)) (y-put "description" (y-str desc))))
+(defn ms-obj [props [:ref :kumitate/Y] required [:list :string]] [:ref :kumitate/Y]
+  (-> (y-map) (y-put "type" (y-str "object")) (y-put "properties" props) (y-put "required" (po-strs required))
+      (y-put "additionalProperties" (y-bool false))))
+(defn ms-pipeline-props [] [:ref :kumitate/Y]
+  (-> (y-map)
+      (y-put "config" (ms-prop "string" "The text of .circleci/config.yml (version 2.1), up to 5 MiB."))
+      (y-put "branch" (ms-prop "string" "The branch the pipeline is for: decides branch filters and << pipeline.git.branch >>."))
+      (y-put "tag" (ms-prop "string" "The tag the pipeline is for: decides tag filters and << pipeline.git.tag >>."))
+      (y-put "parameters" (ms-prop "object" "Pipeline parameter values by name; declared types are checked (a boolean is JSON true/false)."))
+      (y-put "values" (ms-prop "object" "Other << pipeline.* >> values by their full name, e.g. {\"pipeline.number\": 7}. Values not given stay as written, with a warning."))))
+(defn mc-tool [name :string desc :string schema [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (-> (y-map) (y-put "name" (y-str name)) (y-put "description" (y-str desc)) (y-put "inputSchema" schema)
+      (y-put "annotations" (-> (y-map) (y-put "readOnlyHint" (y-bool true)) (y-put "openWorldHint" (y-bool false))))))
+(defn mc-tools [] [:ref :kumitate/Y]
+  (let [one (conj (tx-strs) "config")]
+    (-> (y-seq)
+        (y-add (mc-tool "kumitate_validate"
+                        "Check a CircleCI config.yml (2.1): YAML, structure, parameters, executors, commands, jobs and workflows, with named refusals. Orbs are refused as unresolved: nothing is fetched."
+                        (ms-obj (y-put (y-map) "config" (ms-prop "string" "The text of .circleci/config.yml.")) one)))
+        (y-add (mc-tool "kumitate_plan"
+                        "The processed pipeline of a config: parameters bound, matrix jobs expanded, filters and when/unless decided, the workflow DAG with levels, parallel jobs and containers. Nothing runs."
+                        (ms-obj (ms-pipeline-props) one)))
+        (y-add (mc-tool "kumitate_process"
+                        "The processed config as YAML (version 2), like `circleci config process`: commands and executors expanded, << >> substituted, matrix jobs named."
+                        (ms-obj (ms-pipeline-props) one)))
+        (y-add (mc-tool "kumitate_api_shapes"
+                        "The CircleCI API v2 Pipeline, Workflow and Job objects this config would show when the pipeline is created (statuses from the API's enums). Ids derive from project_slug, number and created_at; nothing is sent to circleci.com."
+                        (ms-obj (-> (ms-pipeline-props)
+                                    (y-put "project_slug" (ms-prop "string" "e.g. gh/org/repo (default gh/example/project)."))
+                                    (y-put "number" (ms-prop "integer" "The pipeline number (default 1)."))
+                                    (y-put "created_at" (ms-prop "string" "ISO-8601 creation time (default 1970-01-01T00:00:00.000Z).")))
+                                one)))
+        (y-add (mc-tool "kumitate_local_plan"
+                        "The steps of each job that would run, in DAG order, for running them yourself on your own machine. kumitate executes nothing."
+                        (ms-obj (ms-pipeline-props) one)))
+        (y-add (mc-tool "kumitate_runs"
+                        "Read CircleCI run records the user already holds (kumitate.runs.v1, an API v2 items page of workflows or jobs, or {workflows, jobs}) and summarize: statuses, failed jobs, success rate and mean duration per job, flaky jobs."
+                        (ms-obj (y-put (y-map) "text" (ms-prop "string" "The JSON text.")) (conj (tx-strs) "text"))))
+        (y-add (mc-tool "kumitate_runs_export"
+                        "Write a normalized run record (kumitate_runs's record) as kumitate.runs.v1 JSON or as CircleCI API v2 items pages. Reading the result again gives the same record."
+                        (ms-obj (-> (y-map) (y-put "record" (ms-prop "object" "The record from kumitate_runs."))
+                                    (y-put "format" (-> (ms-prop "string" "kumitate or circleci-items") (y-put "enum" (po-strs (-> (tx-strs) (conj "kumitate") (conj "circleci-items")))))))
+                                (-> (tx-strs) (conj "record") (conj "format")))))
+        (y-add (mc-tool "kumitate_junit"
+                        "Aggregate JUnit XML test reports (one a run): totals per report, failing tests, flaky tests (passed in one run, failed in another) and the slowest tests. No DTD or external entity is read."
+                        (ms-obj (y-put (y-map) "reports" (-> (ms-prop "array" "JUnit XML texts.") (y-put "items" (y-put (y-map) "type" (y-str "string")))))
+                                (conj (tx-strs) "reports")))))))
+
+;; ---------------------------------------------------------------------------
+;; Tools
+
+(defn mc-yaml-refusal [st [:ref :kumitate/YS]] [:ref :kumitate/Y]
+  (-> (y-map) (y-put "valid" (y-bool false))
+      (y-put "errors" (y-add (y-seq) (-> (y-map) (y-put "code" (y-str (:err st))) (y-put "path" (y-str (tx-cat "line " (tx-istr (:eline st)))))
+                                         (y-put "message" (y-str (:emsg st))))))
+      (y-put "warnings" (y-seq))))
+(defn mc-refusal [code :string path :string msg :string] [:ref :kumitate/Y]
+  (-> (y-map) (y-put "valid" (y-bool false))
+      (y-put "errors" (y-add (y-seq) (-> (y-map) (y-put "code" (y-str code)) (y-put "path" (y-str path)) (y-put "message" (y-str msg)))))
+      (y-put "warnings" (y-seq))))
+(defn mc-inputs [args [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (-> (y-map) (y-put-some "branch" (y-get args "branch")) (y-put-some "tag" (y-get args "tag"))
+      (y-put-some "parameters" (y-get args "parameters")) (y-put-some "values" (y-get args "values"))
+      (y-put-some "project_slug" (y-get args "project_slug")) (y-put-some "number" (y-get args "number"))
+      (y-put-some "created_at" (y-get args "created_at"))))
+;; the result object of a config tool, by kind: validate plan process api local
+(defn mc-config-tool [kind :string text :string inputs [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (if (> (tx-len text) (mc-max-input)) (mc-refusal "input/too-large" "config" "more than 5 MiB")
+    (let [r (ym-parse text)]
+      (if (not (ym-ok? (:st r))) (mc-yaml-refusal (:st r))
+        (cond (tx-eq kind "validate")
+                (let [ds (cf-check (:node r))]
+                  (if (> (d-errors ds) 0) (po-check-y ds)
+                    (po-check-y (:diags (pl-plan (:node r) inputs)))))
+              :else
+                (let [pr (pl-plan (:node r) inputs)]
+                  (cond (tx-eq kind "plan") (po-plan-y pr)
+                        (tx-eq kind "process") (y-put (po-check-y (:diags pr)) "yaml" (if (pl-ok? pr) (y-str (ye-emit (po-processed pr))) (y-null)))
+                        (tx-eq kind "api") (y-put (po-check-y (:diags pr)) "api" (ap-shapes pr inputs))
+                        :else (po-local pr))))))))
+(defn mc-runs [text :string] [:ref :kumitate/Y]
+  (if (> (tx-len text) (mc-max-input)) (mc-refusal "input/too-large" "text" "more than 5 MiB")
+    (let [x (ap-runs-read text)]
+      (if (> (d-errors (:diags x)) 0) (po-check-y (:diags x))
+        (-> (po-check-y (:diags x)) (y-put "record" (:node x)) (y-put "summary" (ap-runs-summary (:node x))))))))
+(defn mc-runs-export [record [:ref :kumitate/Y] format :string] [:ref :kumitate/Y]
+  (let [x (ap-runs-read (js-write record))]
+    (cond (> (d-errors (:diags x)) 0) (po-check-y (:diags x))
+          (tx-eq format "kumitate") (y-put (po-check-y (:diags x)) "text" (y-str (js-write (:node x))))
+          (tx-eq format "circleci-items") (y-put (po-check-y (:diags x)) "text" (y-str (js-write (ap-runs-items (:node x)))))
+          :else (mc-refusal "runs/format" "format" "kumitate or circleci-items"))))
+(defn mc-junit [reports [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (let [texts (loop [i 0 acc (tx-strs)] (if (< i (y-n reports)) (recur (+ i 1) (conj acc (:text (y-at reports i)))) acc))
+        total (loop [i 0 n 0] (if (< i (count texts)) (recur (+ i 1) (+ n (tx-len (nth texts i)))) n))
+        x (if (> total (mc-max-input)) (pl-xr (y-null) (conj (d-list) (d-err "input/too-large" "reports" "more than 5 MiB"))) (ap-junit texts))]
+    (if (> (d-errors (:diags x)) 0) (po-check-y (:diags x))
+      (loop [i 0 acc (po-check-y (:diags x))] (if (< i (y-n (:node x))) (recur (+ i 1) (y-put acc (y-key (:node x) i) (y-at (:node x) i))) acc)))))
+;; "" when the arguments fit the tool, else what is wrong
+(defn mc-args-problem [name :string args [:ref :kumitate/Y]] :string
+  (cond (not (y-map? args)) "arguments is an object"
+        (and (or (tx-eq name "kumitate_validate") (tx-eq name "kumitate_plan") (tx-eq name "kumitate_process")
+                 (tx-eq name "kumitate_api_shapes") (tx-eq name "kumitate_local_plan"))
+             (not (= (:kind (y-get args "config")) 2))) "config is a string"
+        (and (y-has? args "branch") (not (= (:kind (y-get args "branch")) 2))) "branch is a string"
+        (and (y-has? args "tag") (not (= (:kind (y-get args "tag")) 2))) "tag is a string"
+        (and (y-has? args "parameters") (not (y-map? (y-get args "parameters")))) "parameters is an object"
+        (and (y-has? args "values") (not (y-map? (y-get args "values")))) "values is an object"
+        (and (tx-eq name "kumitate_runs") (not (= (:kind (y-get args "text")) 2))) "text is a string"
+        (and (tx-eq name "kumitate_runs_export") (not (y-map? (y-get args "record")))) "record is an object"
+        (and (tx-eq name "kumitate_runs_export") (not (= (:kind (y-get args "format")) 2))) "format is a string"
+        (and (tx-eq name "kumitate_junit")
+             (or (not (y-seq? (y-get args "reports")))
+                 (loop [i 0] (cond (>= i (y-n (y-get args "reports"))) false
+                                   (not (= (:kind (y-at (y-get args "reports") i)) 2)) true
+                                   :else (recur (+ i 1)))))) "reports is a list of strings"
+        :else ""))
+(defn mc-call [name :string args [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (cond (tx-eq name "kumitate_validate") (mc-config-tool "validate" (:text (y-get args "config")) (y-map))
+        (tx-eq name "kumitate_plan") (mc-config-tool "plan" (:text (y-get args "config")) (mc-inputs args))
+        (tx-eq name "kumitate_process") (mc-config-tool "process" (:text (y-get args "config")) (mc-inputs args))
+        (tx-eq name "kumitate_api_shapes") (mc-config-tool "api" (:text (y-get args "config")) (mc-inputs args))
+        (tx-eq name "kumitate_local_plan") (mc-config-tool "local" (:text (y-get args "config")) (mc-inputs args))
+        (tx-eq name "kumitate_runs") (mc-runs (:text (y-get args "text")))
+        (tx-eq name "kumitate_runs_export") (mc-runs-export (y-get args "record") (:text (y-get args "format")))
+        :else (mc-junit (y-get args "reports"))))
+(defn mc-tool-names [] [:list :string]
+  (let [ts (mc-tools)] (loop [i 0 acc (tx-strs)] (if (< i (y-n ts)) (recur (+ i 1) (conj acc (:text (y-get (y-at ts i) "name")))) acc))))
+
+;; ---------------------------------------------------------------------------
+;; JSON-RPC
+
+(defn mc-answer [id [:ref :kumitate/Y] result [:ref :kumitate/Y]] :string
+  (js-write (-> (y-map) (y-put "jsonrpc" (y-str "2.0")) (y-put "id" id) (y-put "result" result))))
+(defn mc-error [id [:ref :kumitate/Y] code :i64 msg :string] :string
+  (js-write (-> (y-map) (y-put "jsonrpc" (y-str "2.0")) (y-put "id" id)
+                (y-put "error" (-> (y-map) (y-put "code" (y-int code)) (y-put "message" (y-str msg)))))))
+(defn mc-handle [text :string] :string
+  (let [r (js-parse text)]
+    (if (not (tx-empty? (:err r))) (mc-error (y-null) -32700 (tx-cat "parse error: " (:err r)))
+      (let [m (:node r) id (y-get m "id") method (:text (y-get m "method")) params (y-get m "params")]
+        (cond (y-seq? m) (mc-error (y-null) -32600 "batches are not accepted")
+              (or (not (y-map? m)) (not (tx-eq (:text (y-get m "jsonrpc")) "2.0")) (not (= (:kind (y-get m "method")) 2)))
+                (if (and (y-map? m) (y-has? m "id") (not (y-has? m "method"))) ""
+                  (mc-error (if (y-map? m) id (y-null)) -32600 "invalid request"))
+              (not (y-has? m "id")) ""
+              (tx-eq method "initialize")
+                (let [asked (:text (y-get params "protocolVersion"))
+                      v (if (tx-member? (mc-protocols) asked) asked (nth (mc-protocols) 0))]
+                  (mc-answer id (-> (y-map) (y-put "protocolVersion" (y-str v))
+                                    (y-put "capabilities" (y-put (y-map) "tools" (y-put (y-map) "listChanged" (y-bool false))))
+                                    (y-put "serverInfo" (-> (y-map) (y-put "name" (y-str "kumitate")) (y-put "version" (y-str (mc-version)))))
+                                    (y-put "instructions" (y-str "kumitate reads CircleCI config.yml (2.1), run records and JUnit reports that the user passes in. It fetches no orb, connects to no CircleCI or VCS service and runs no job.")))))
+              (tx-eq method "ping") (mc-answer id (y-map))
+              (tx-eq method "tools/list") (mc-answer id (y-put (y-map) "tools" (mc-tools)))
+              (tx-eq method "tools/call")
+                (let [name (:text (y-get params "name")) args (if (y-has? params "arguments") (y-get params "arguments") (y-map))
+                      prob (mc-args-problem name args)]
+                  (cond (not (tx-member? (mc-tool-names) name)) (mc-error id -32602 (tx-cat "unknown tool: " name))
+                        (not (tx-empty? prob)) (mc-error id -32602 (tx-cat3 name ": " prob))
+                        :else (let [res (mc-call name args)]
+                                (mc-answer id (-> (y-map) (y-put "content" (y-add (y-seq) (-> (y-map) (y-put "type" (y-str "text")) (y-put "text" (y-str (js-write res))))))
+                                                  (y-put "structuredContent" res)
+                                                  (y-put "isError" (y-bool (y-false? (y-get res "valid")))))))))
+              :else (mc-error id -32601 (tx-cat "method not found: " method)))))))

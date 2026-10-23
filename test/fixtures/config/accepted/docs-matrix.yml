@@ -1,0 +1,54 @@
+# After the CircleCI docs "Using matrix jobs": parameters expand into one job
+# per combination (named job-v1-v2, values in parameter-name order), exclude,
+# alias, << matrix.x >> in requires and name, and requiring every combination.
+version: 2.1
+executors:
+  linux:
+    docker:
+      - image: cimg/base:stable
+  macos:
+    macos:
+      xcode: 15.4.0
+jobs:
+  build:
+    parameters:
+      version:
+        type: string
+    docker:
+      - image: cimg/go:<< parameters.version >>
+    steps:
+      - run: go build ./...
+  test:
+    parameters:
+      os:
+        type: executor
+      version:
+        type: string
+    executor: << parameters.os >>
+    steps:
+      - run: echo testing << parameters.version >>
+  release:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run: echo release
+workflows:
+  matrix:
+    jobs:
+      - build:
+          matrix:
+            parameters:
+              version: ["1.21", "1.22"]
+      - test:
+          name: test-<< matrix.os >>-on-<< matrix.version >>
+          requires: [build-<< matrix.version >>]
+          matrix:
+            alias: all-tests
+            parameters:
+              os: [linux, macos]
+              version: ["1.21", "1.22"]
+            exclude:
+              - os: macos
+                version: "1.21"
+      - release:
+          requires: [all-tests]

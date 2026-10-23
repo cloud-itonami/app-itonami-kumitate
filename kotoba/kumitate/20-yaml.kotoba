@@ -1,0 +1,461 @@
+;; 20-yaml (prefix ym-): the YAML that CircleCI configs are written in, read into Y.
+;;
+;; Read: block mappings and sequences (compact "- key: v" items, a sequence at
+;; its key's indentation), plain scalars over several lines, single and double
+;; quoted scalars (escapes \n \t \" \\ \/ \r \0 \xHH \uXXXX), block scalars
+;; | > with - + chomping and an indentation digit, flow [..] and {..} over
+;; several lines, comments, a leading --- and %YAML, anchors &a, aliases *a and
+;; merge keys << (one map or a list of maps; written keys win).
+;; Refused by name, never guessed: yaml/tab-indent, yaml/tag-unsupported,
+;; yaml/multi-document, yaml/duplicate-key, yaml/unknown-alias,
+;; yaml/flow-anchor-unsupported (an anchor inside [..] or {..}), yaml/unterminated-quote, yaml/unterminated-flow,
+;; yaml/bad-escape, yaml/bad-indent, yaml/trailing-content, yaml/bad-merge,
+;; yaml/complex-key-unsupported, yaml/empty.
+;; Scalars keep their text; types (true, 12) are read by whoever uses them.
+
+;; parse state: the source, its line table (5 words a line: indent, content
+;; start, content end, raw start, raw end), anchors, and the first error
+(defrecord YS [src :string lines :vector-i64 n :i64 anames [:list :string]
+               anodes [:list [:ref :kumitate/Y]] err :string eline :i64 emsg :string])
+(defrecord YR [node [:ref :kumitate/Y] pos :i64 st [:ref :kumitate/YS]])
+(defrecord FR [node [:ref :kumitate/Y] pos :i64 err :string])
+
+(defn ym-ind [st [:ref :kumitate/YS] i :i64] :i64 (vector-at (:lines st) (* 5 i)))
+(defn ym-cs [st [:ref :kumitate/YS] i :i64] :i64 (vector-at (:lines st) (+ (* 5 i) 1)))
+(defn ym-ce [st [:ref :kumitate/YS] i :i64] :i64 (vector-at (:lines st) (+ (* 5 i) 2)))
+(defn ym-rs [st [:ref :kumitate/YS] i :i64] :i64 (vector-at (:lines st) (+ (* 5 i) 3)))
+(defn ym-re [st [:ref :kumitate/YS] i :i64] :i64 (vector-at (:lines st) (+ (* 5 i) 4)))
+(defn ym-blank? [st [:ref :kumitate/YS] i :i64] :bool (>= (ym-cs st i) (ym-ce st i)))
+(defn ym-content [st [:ref :kumitate/YS] i :i64] :string (tx-sub (:src st) (ym-cs st i) (ym-ce st i)))
+(defn ym-ok? [st [:ref :kumitate/YS]] :bool (tx-empty? (:err st)))
+(defn ym-fail [st [:ref :kumitate/YS] code :string line :i64 msg :string] [:ref :kumitate/YS]
+  (if (ym-ok? st) (assoc (assoc (assoc st :err code) :eline (+ line 1)) :emsg msg) st))
+(defn ym-r [node [:ref :kumitate/Y] pos :i64 st [:ref :kumitate/YS]] [:ref :kumitate/YR] (->YR node pos st))
+(defn ym-at-line [y [:ref :kumitate/Y] i :i64] [:ref :kumitate/Y] (assoc y :line (+ i 1)))
+
+;; ---------------------------------------------------------------------------
+;; Line table
+
+;; can a quote at offset i open a quoted scalar (start of a token)?
+;; (only the first character of a scalar opens a quote: `echo "a # b"` is the
+;; plain scalar `echo "a` and a comment)
+(defn ym-token-start? [s :string a :i64 i :i64] :bool
+  (let [j (loop [k (- i 1)] (if (and (>= k a) (tx-space? (tx-cp s k))) (recur (- k 1)) k))]
+    (if (< j a) true
+      (let [p (tx-cp s j)]
+        (or (= p 91) (= p 123) (= p 44)
+            (and (or (= p 58) (= p 45)) (< (+ j 1) i)
+                 (or (= j a) (tx-space? (tx-cp s (- j 1))) (= p 58))))))))
+;; end of the content of [a, b): a # that starts a comment, outside quotes
+(defn ym-comment-at [s :string a :i64 b :i64] :i64
+  (loop [i a q 0]
+    (if (>= i b) b
+      (let [c (tx-cp s i) w (tx-w c)]
+        (cond (= q 2) (cond (= c 92) (recur (+ i (if (< (+ i 1) b) (+ 1 (tx-w (tx-cp s (+ i 1)))) 1)) q)
+                            (= c 34) (recur (+ i 1) 0)
+                            :else (recur (+ i w) q))
+              (= q 1) (if (= c 39) (recur (+ i 1) 0) (recur (+ i w) q))
+              (and (= c 34) (ym-token-start? s a i)) (recur (+ i 1) 2)
+              (and (= c 39) (ym-token-start? s a i)) (recur (+ i 1) 1)
+              (and (= c 35) (or (= i a) (tx-space? (tx-cp s (- i 1))))) i
+              :else (recur (+ i w) q))))))
+(defn ym-table [s :string] :vector-i64
+  (let [n (tx-len s)]
+    (loop [a 0 v (vector-alloc 0)]
+      (if (>= a n) v
+        (let [nl (tx-index-from s "\n" a)
+              e0 (if (< nl 0) n nl)
+              e (if (and (> e0 a) (= (tx-cp s (- e0 1)) 13)) (- e0 1) e0)
+              ind (loop [i a] (if (and (< i e) (= (tx-cp s i) 32)) (recur (+ i 1)) (- i a)))
+              cs (+ a ind)
+              ce (tx-rtrim-at s cs (ym-comment-at s cs e))
+              v1 (vector-conj (vector-conj (vector-conj (vector-conj (vector-conj v ind) cs) ce) a) e)]
+          (if (< nl 0) v1 (recur (+ nl 1) v1)))))))
+(defn ym-state [s :string] [:ref :kumitate/YS]
+  (let [t (ym-table s)]
+    (->YS s t (quot (vector-count t) 5) (tx-strs) (y-list) "" 0 "")))
+;; the next line at or after i that has content, or n
+(defn ym-skip [st [:ref :kumitate/YS] i :i64] :i64
+  (loop [k i] (if (and (< k (:n st)) (ym-blank? st k)) (recur (+ k 1)) k)))
+;; a copy of the state whose line i starts at offset c (a compact item)
+(defn ym-shift [st [:ref :kumitate/YS] i :i64 c :i64] [:ref :kumitate/YS]
+  (let [d (- c (ym-cs st i)) v (:lines st)]
+    (assoc st :lines (vector-assoc (vector-assoc v (* 5 i) (+ (ym-ind st i) d)) (+ (* 5 i) 1) c))))
+
+;; ---------------------------------------------------------------------------
+;; Scalars
+
+;; offset of the closing quote of a quoted scalar opening at a, or -1
+(defn ym-close-quote [s :string a :i64 b :i64] :i64
+  (let [q (tx-cp s a)]
+    (loop [i (+ a 1)]
+      (if (>= i b) -1
+        (let [c (tx-cp s i)]
+          (cond (and (= q 34) (= c 92)) (recur (+ i (if (< (+ i 1) b) (+ 1 (tx-w (tx-cp s (+ i 1)))) 1)))
+                (and (= q 39) (= c 39) (< (+ i 1) b) (= (tx-cp s (+ i 1)) 39)) (recur (+ i 2))
+                (= c q) i
+                :else (recur (+ i (tx-w c)))))))))
+;; the text of a double-quoted body [a, b), escapes applied; "" + err via FR
+(defn ym-unescape [s :string a :i64 b :i64] [:ref :kumitate/FR]
+  (loop [i a k a acc ""]
+    (if (>= i b) (->FR (y-str (tx-cat acc (tx-sub s k b))) b "")
+      (let [c (tx-cp s i)]
+        (if (not (= c 92)) (recur (+ i (tx-w c)) k acc)
+          (let [e (if (< (+ i 1) b) (tx-cp s (+ i 1)) 0)
+                pre (tx-cat acc (tx-sub s k i))
+                simple (cond (= e 110) "\n" (= e 116) "\t" (= e 34) "\"" (= e 92) "\\" (= e 47) "/"
+                             (= e 114) "\r" (= e 48) (tx-utf8 0) (= e 32) " " (= e 101) (tx-utf8 27) :else "")]
+            (cond (not (tx-empty? simple)) (recur (+ i 2) (+ i 2) (tx-cat pre simple))
+                  (or (= e 120) (= e 117))
+                    (let [m (if (= e 120) 2 4)
+                          v (loop [j 0 v 0]
+                              (cond (>= j m) v
+                                    (>= (+ i 2 j) b) -1
+                                    (< (tx-hex-val (tx-cp s (+ i 2 j))) 0) -1
+                                    :else (recur (+ j 1) (+ (* v 16) (tx-hex-val (tx-cp s (+ i 2 j)))))))]
+                      (if (< v 0) (->FR (y-null) i "yaml/bad-escape")
+                        (recur (+ i 2 m) (+ i 2 m) (tx-cat pre (tx-utf8 v)))))
+                  (= e 10) (recur (+ i 2) (+ i 2) pre)
+                  :else (->FR (y-null) i "yaml/bad-escape"))))))))
+(defn ym-unsingle [s :string a :i64 b :i64] [:ref :kumitate/Y]
+  (y-str (tx-replace-all (tx-sub s a b) "''" "'")))
+;; a quoted scalar at [a, b) of s (a is the quote): node and the offset after it
+(defn ym-quoted [s :string a :i64 b :i64] [:ref :kumitate/FR]
+  (let [e (ym-close-quote s a b)]
+    (cond (< e 0) (->FR (y-null) a "yaml/unterminated-quote")
+          (= (tx-cp s a) 39) (->FR (ym-unsingle s (+ a 1) e) (+ e 1) "")
+          :else (let [r (ym-unescape s (+ a 1) e)] (assoc r :pos (+ e 1))))))
+(defn ym-null-text? [t :string] :bool
+  (or (tx-empty? t) (tx-eq t "~") (tx-eq t "null") (tx-eq t "Null") (tx-eq t "NULL")))
+(defn ym-plain [t :string] [:ref :kumitate/Y]
+  (if (ym-null-text? t) (y-null) (y-plain t)))
+
+;; ---------------------------------------------------------------------------
+;; Flow collections, on one string
+
+(defn ym-fl-ws [s :string i :i64] :i64
+  (loop [k i] (if (and (< k (tx-len s)) (or (tx-space? (tx-cp s k)) (= (tx-cp s k) 10))) (recur (+ k 1)) k)))
+;; end of a plain flow scalar from i: before , ] } or ": "
+(defn ym-fl-plain-end [s :string i :i64] :i64
+  (let [n (tx-len s)]
+    (loop [k i]
+      (if (>= k n) n
+        (let [c (tx-cp s k)]
+          (cond (or (= c 44) (= c 93) (= c 125)) k
+                (and (= c 58) (or (>= (+ k 1) n) (tx-space? (tx-cp s (+ k 1))) (= (tx-cp s (+ k 1)) 44)
+                                  (= (tx-cp s (+ k 1)) 93) (= (tx-cp s (+ k 1)) 125))) k
+                :else (recur (+ k (tx-w c)))))))))
+(defn ym-fl-value [s :string i0 :i64 st [:ref :kumitate/YS]] [:ref :kumitate/FR]
+  (let [i (ym-fl-ws s i0) n (tx-len s)]
+    (if (>= i n) (->FR (y-null) i "yaml/unterminated-flow")
+      (let [c (tx-cp s i)]
+        (cond (= c 91) (ym-fl-seq s (+ i 1) st)
+              (= c 123) (ym-fl-map s (+ i 1) st)
+              (or (= c 34) (= c 39)) (ym-quoted s i n)
+              (= c 42) (let [e (ym-name-end s i (tx-len s)) k (ym-anchor-find st (tx-sub s (+ i 1) e))]
+                         (if (< k 0) (->FR (y-null) i "yaml/unknown-alias") (->FR (nth (:anodes st) k) e "")))
+              (= c 38) (->FR (y-null) i "yaml/flow-anchor-unsupported")
+              (= c 33) (->FR (y-null) i "yaml/tag-unsupported")
+              :else (let [e (ym-fl-plain-end s i)]
+                      (->FR (ym-plain (tx-sub s i (tx-rtrim-at s i e))) e "")))))))
+(defn ym-fl-seq [s :string i0 :i64 st [:ref :kumitate/YS]] [:ref :kumitate/FR]
+  (loop [i i0 acc (y-seq)]
+    (let [k (ym-fl-ws s i) n (tx-len s)]
+      (cond (>= k n) (->FR acc k "yaml/unterminated-flow")
+            (= (tx-cp s k) 93) (->FR acc (+ k 1) "")
+            :else (let [r (ym-fl-value s k st)]
+                    (if (not (tx-empty? (:err r))) r
+                      (let [k2 (ym-fl-ws s (:pos r))]
+                        (cond (>= k2 n) (->FR acc k2 "yaml/unterminated-flow")
+                              (= (tx-cp s k2) 44) (recur (+ k2 1) (y-add acc (:node r)))
+                              (= (tx-cp s k2) 93) (->FR (y-add acc (:node r)) (+ k2 1) "")
+                              :else (->FR acc k2 "yaml/unterminated-flow")))))))))
+(defn ym-fl-map [s :string i0 :i64 st [:ref :kumitate/YS]] [:ref :kumitate/FR]
+  (loop [i i0 acc (y-map)]
+    (let [k (ym-fl-ws s i) n (tx-len s)]
+      (cond (>= k n) (->FR acc k "yaml/unterminated-flow")
+            (= (tx-cp s k) 125) (->FR acc (+ k 1) "")
+            :else
+              (let [kr (ym-fl-value s k st)]
+                (if (not (tx-empty? (:err kr))) kr
+                  (if (not (y-scalar? (:node kr))) (->FR acc k "yaml/complex-key-unsupported")
+                    (let [key (:text (:node kr)) k2 (ym-fl-ws s (:pos kr))]
+                      (cond (y-has? acc key) (->FR acc k "yaml/duplicate-key")
+                            (>= k2 n) (->FR acc k2 "yaml/unterminated-flow")
+                            (= (tx-cp s k2) 58)
+                              (let [vr (ym-fl-value s (+ k2 1) st)]
+                                (if (not (tx-empty? (:err vr))) vr
+                                  (let [k3 (ym-fl-ws s (:pos vr))]
+                                    (cond (>= k3 n) (->FR acc k3 "yaml/unterminated-flow")
+                                          (= (tx-cp s k3) 44) (recur (+ k3 1) (y-put acc key (:node vr)))
+                                          (= (tx-cp s k3) 125) (->FR (y-put acc key (:node vr)) (+ k3 1) "")
+                                          :else (->FR acc k3 "yaml/unterminated-flow")))))
+                            (= (tx-cp s k2) 44) (recur (+ k2 1) (y-put acc key (y-null)))
+                            (= (tx-cp s k2) 125) (->FR (y-put acc key (y-null)) (+ k2 1) "")
+                            :else (->FR acc k2 "yaml/unterminated-flow"))))))))))
+;; depth change of [ { minus ] } in [a, b), outside quotes
+(defn ym-bracket-depth [s :string a :i64 b :i64] :i64
+  (loop [i a d 0 q 0]
+    (if (>= i b) d
+      (let [c (tx-cp s i)]
+        (cond (= q 2) (cond (= c 92) (recur (+ i 2) d q) (= c 34) (recur (+ i 1) d 0) :else (recur (+ i (tx-w c)) d q))
+              (= q 1) (if (= c 39) (recur (+ i 1) d 0) (recur (+ i (tx-w c)) d q))
+              (= c 34) (recur (+ i 1) d 2)
+              (= c 39) (recur (+ i 1) d 1)
+              (or (= c 91) (= c 123)) (recur (+ i 1) (+ d 1) q)
+              (or (= c 93) (= c 125)) (recur (+ i 1) (- d 1) q)
+              :else (recur (+ i (tx-w c)) d q))))))
+
+;; ---------------------------------------------------------------------------
+;; Values on a line
+
+;; the offset of the ':' that ends a mapping key in [a, b), or -1
+(defn ym-key-colon [s :string a :i64 b :i64] :i64
+  (if (>= a b) -1
+    (let [c0 (tx-cp s a)]
+      (cond (or (= c0 91) (= c0 123) (= c0 124) (= c0 62) (= c0 42) (= c0 33) (= c0 37)) -1
+            (and (= c0 45) (or (= (+ a 1) b) (tx-space? (tx-cp s (+ a 1))))) -1
+            (or (= c0 34) (= c0 39))
+              (let [e (ym-close-quote s a b) k (if (< e 0) -1 (tx-skip-sp s (+ e 1) b))]
+                (if (and (>= k 0) (< k b) (= (tx-cp s k) 58) (or (= (+ k 1) b) (tx-space? (tx-cp s (+ k 1))))) k -1))
+            (and (= c0 63) (or (= (+ a 1) b) (tx-space? (tx-cp s (+ a 1))))) -2
+            :else (loop [i a]
+                    (if (>= i b) -1
+                      (let [c (tx-cp s i)]
+                        (cond (and (= c 58) (or (= (+ i 1) b) (tx-space? (tx-cp s (+ i 1))))) i
+                              (and (= c 35) (> i a) (tx-space? (tx-cp s (- i 1)))) -1
+                              :else (recur (+ i (tx-w c)))))))))))
+(defn ym-dash? [st [:ref :kumitate/YS] i :i64] :bool
+  (let [s (:src st) a (ym-cs st i) b (ym-ce st i)]
+    (and (< a b) (= (tx-cp s a) 45) (or (= (+ a 1) b) (tx-space? (tx-cp s (+ a 1)))))))
+(defn ym-key-line? [st [:ref :kumitate/YS] i :i64] :bool
+  (not (= (ym-key-colon (:src st) (ym-cs st i) (ym-ce st i)) -1)))
+
+;; a plain scalar from offset a of line i, folding the more-indented lines after it
+(defn ym-plain-lines [st [:ref :kumitate/YS] i :i64 a :i64 ind :i64] [:ref :kumitate/YR]
+  (let [s (:src st)]
+    (loop [k (+ i 1) acc (tx-sub s a (ym-ce st i))]
+      (let [k2 (ym-skip st k)]
+        (if (and (< k2 (:n st)) (> (ym-ind st k2) ind) (not (ym-key-line? st k2)) (not (ym-dash? st k2)))
+          (recur (+ k2 1) (tx-cat3 acc (if (> k2 k) "\n" " ") (ym-content st k2)))
+          (ym-r (ym-at-line (ym-plain acc) i) k st))))))
+;; a flow collection from offset a of line i, over as many lines as it takes
+(defn ym-flow-lines [st [:ref :kumitate/YS] i :i64 a :i64] [:ref :kumitate/YR]
+  (let [s (:src st)]
+    (loop [k i txt (tx-sub s a (ym-ce st i)) d (ym-bracket-depth s a (ym-ce st i))]
+      (if (or (<= d 0) (>= (+ k 1) (:n st)))
+        (let [r (ym-fl-value txt 0 st)
+              rest (if (tx-empty? (:err r)) (tx-trim (tx-from txt (:pos r))) "")]
+          (cond (not (tx-empty? (:err r))) (ym-r (y-null) (+ k 1) (ym-fail st (:err r) k "in a flow collection"))
+                (not (tx-empty? rest)) (ym-r (y-null) (+ k 1) (ym-fail st "yaml/trailing-content" k rest))
+                :else (ym-r (ym-at-line (:node r) i) (+ k 1) st)))
+        (let [k2 (+ k 1)]
+          (recur k2 (tx-cat3 txt " " (ym-content st k2)) (+ d (ym-bracket-depth s (ym-cs st k2) (ym-ce st k2)))))))))
+;; a quoted scalar from offset a of line i; one that spans lines is folded
+(defn ym-quoted-lines [st [:ref :kumitate/YS] i :i64 a :i64] [:ref :kumitate/YR]
+  (let [s (:src st) e (ym-close-quote s a (ym-re st i))]
+    (if (>= e 0)
+      (let [r (ym-quoted s a (ym-re st i))
+            rest (tx-trim (tx-sub s (:pos r) (tx-rtrim-at s (:pos r) (ym-comment-at s (:pos r) (ym-re st i)))))]
+        (cond (not (tx-empty? (:err r))) (ym-r (y-null) (+ i 1) (ym-fail st (:err r) i ""))
+              (not (tx-empty? rest)) (ym-r (y-null) (+ i 1) (ym-fail st "yaml/trailing-content" i rest))
+              :else (ym-r (ym-at-line (:node r) i) (+ i 1) st)))
+      ;; join the raw lines with spaces until the quote closes
+      (loop [k i txt (tx-sub s a (ym-re st i))]
+        (if (>= (+ k 1) (:n st)) (ym-r (y-null) (+ k 1) (ym-fail st "yaml/unterminated-quote" i ""))
+          (let [k2 (+ k 1)
+                piece (tx-trim (tx-sub s (ym-rs st k2) (ym-re st k2)))
+                t2 (tx-cat3 txt (if (tx-empty? piece) "\n" " ") piece)
+                e2 (ym-close-quote t2 0 (tx-len t2))]
+            (if (< e2 0) (recur k2 t2)
+              (let [r (ym-quoted t2 0 (tx-len t2))]
+                (if (not (tx-empty? (:err r))) (ym-r (y-null) (+ k2 1) (ym-fail st (:err r) k2 ""))
+                  (ym-r (ym-at-line (:node r) i) (+ k2 1) st))))))))))
+
+;; a block scalar whose header is at offset a of line i; content lines are
+;; more indented than ind
+(defn ym-block-scalar [st [:ref :kumitate/YS] i :i64 a :i64 ind :i64] [:ref :kumitate/YR]
+  (let [s (:src st) hb (ym-ce st i)
+        folded (= (tx-cp s a) 62)
+        hdr (tx-sub s (+ a 1) hb)
+        chomp (cond (tx-has? hdr "-") 1 (tx-has? hdr "+") 2 :else 0)
+        digit (loop [k 0] (cond (>= k (tx-len hdr)) 0
+                                 (and (tx-digit? (tx-cp hdr k)) (> (tx-cp hdr k) 48)) (- (tx-cp hdr k) 48)
+                                 :else (recur (+ k 1))))
+        bad (loop [k 0] (cond (>= k (tx-len hdr)) false
+                               (or (tx-digit? (tx-cp hdr k)) (= (tx-cp hdr k) 45) (= (tx-cp hdr k) 43)) (recur (+ k 1))
+                               :else true))
+        ;; the lines of the block: blank (raw) or more indented than ind
+        last (loop [k (+ i 1) l i]
+               (cond (>= k (:n st)) l
+                     (= (tx-skip-sp s (ym-rs st k) (ym-re st k)) (ym-re st k)) (recur (+ k 1) l)
+                     (> (ym-ind st k) ind) (recur (+ k 1) k)
+                     :else l))
+        end (loop [k (+ i 1)]
+              (cond (>= k (:n st)) k
+                    (= (tx-skip-sp s (ym-rs st k) (ym-re st k)) (ym-re st k)) (recur (+ k 1))
+                    (> (ym-ind st k) ind) (recur (+ k 1))
+                    :else k))
+        bi (if (> digit 0) (+ (max ind 0) digit)
+             (loop [k (+ i 1)] (cond (> k last) (+ ind 1)
+                                     (= (tx-skip-sp s (ym-rs st k) (ym-re st k)) (ym-re st k)) (recur (+ k 1))
+                                     :else (ym-ind st k))))
+        lines (loop [k (+ i 1) acc (tx-strs)]
+                (if (> k last) acc
+                  (let [rs (ym-rs st k) re (ym-re st k)]
+                    (recur (+ k 1) (conj acc (if (> (+ rs bi) re) "" (tx-sub s (+ rs bi) re)))))))
+        ;; blank lines after the last content line, for keep
+        trail (loop [k (+ last 1) t 0] (if (< k end) (recur (+ k 1) (+ t 1)) t))
+        body (if folded (ym-fold lines) (tx-join lines "\n"))
+        core (loop [b body] (if (tx-ends? b "\n") (recur (tx-sub b 0 (- (tx-len b) 1))) b))
+        text (cond (= chomp 1) core
+                   (= chomp 2) (loop [t (tx-cat body (if (> (count lines) 0) "\n" "")) k 0] (if (< k trail) (recur (tx-cat t "\n") (+ k 1)) t))
+                   (tx-empty? core) ""
+                   :else (tx-cat core "\n"))]
+    (if bad (ym-r (y-null) end (ym-fail st "yaml/bad-indent" i (tx-cat "block scalar header " hdr)))
+      (ym-r (ym-at-line (y-str text) i) end st))))
+;; folding of a > block: lines join with a space, an empty line is a newline,
+;; and more-indented lines keep their newlines
+(defn ym-fold [lines [:list :string]] :string
+  (loop [k 0 acc "" prev 0]
+    (if (>= k (count lines)) acc
+      (let [l (nth lines k)
+            kind (cond (tx-empty? l) 0 (tx-space? (tx-cp l 0)) 2 :else 1)
+            sep (cond (= k 0) "" (= kind 0) "\n" (= prev 0) "" (and (= kind 1) (= prev 1)) " " :else "\n")]
+        (recur (+ k 1) (tx-cat3 acc sep l) kind)))))
+
+;; ---------------------------------------------------------------------------
+;; Nodes
+
+(defn ym-anchor-add [st [:ref :kumitate/YS] name :string y [:ref :kumitate/Y]] [:ref :kumitate/YS]
+  (assoc (assoc st :anames (conj (:anames st) name)) :anodes (conj (:anodes st) y)))
+(defn ym-anchor-find [st [:ref :kumitate/YS] name :string] :i64
+  (loop [k (- (count (:anames st)) 1)] (cond (< k 0) -1 (string=? (nth (:anames st) k) name) k :else (recur (- k 1)))))
+;; end of an anchor or alias name starting at a
+(defn ym-name-end [s :string a :i64 b :i64] :i64
+  (loop [k a] (if (and (< k b) (not (tx-space? (tx-cp s k))) (not (= (tx-cp s k) 44))
+                       (not (= (tx-cp s k) 93)) (not (= (tx-cp s k) 125)))
+                (recur (+ k (tx-w (tx-cp s k)))) k)))
+
+;; the value that starts at offset a of line i, for a node at indentation ind
+;; (a mapping key's indentation, or a sequence dash's)
+(defn ym-value [st [:ref :kumitate/YS] i :i64 a :i64 ind :i64] [:ref :kumitate/YR]
+  (let [s (:src st) b (ym-ce st i)]
+    (if (>= a b)
+      ;; nothing on the line: the block below, or a sequence at the same indentation
+      (let [k (ym-skip st (+ i 1))]
+        (cond (and (< k (:n st)) (> (ym-ind st k) ind)) (ym-node st k (+ ind 1))
+              (and (< k (:n st)) (= (ym-ind st k) ind) (ym-dash? st k) (>= ind 0)) (ym-seq st k ind)
+              :else (ym-r (ym-at-line (y-null) i) (+ i 1) st)))
+      (let [c (tx-cp s a)]
+        (cond (= c 38)
+                (let [e (ym-name-end s a b) name (tx-sub s (+ a 1) e) a2 (tx-skip-sp s e b)
+                      r (if (and (< a2 b) (>= (ym-key-colon s a2 b) 0))
+                          (ym-node (ym-shift st i a2) i (+ ind 1))
+                          (ym-value st i a2 ind))]
+                  (ym-r (:node r) (:pos r) (ym-anchor-add (:st r) name (:node r))))
+              (= c 42)
+                (let [e (ym-name-end s a b) name (tx-sub s (+ a 1) e) k (ym-anchor-find st name)]
+                  (cond (< k 0) (ym-r (y-null) (+ i 1) (ym-fail st "yaml/unknown-alias" i name))
+                        (< (tx-skip-sp s e b) b) (ym-r (y-null) (+ i 1) (ym-fail st "yaml/trailing-content" i (tx-sub s e b)))
+                        :else (ym-r (nth (:anodes st) k) (+ i 1) st)))
+              (= c 33) (ym-r (y-null) (+ i 1) (ym-fail st "yaml/tag-unsupported" i (tx-sub s a b)))
+              (or (= c 124) (= c 62)) (ym-block-scalar st i a ind)
+              (or (= c 91) (= c 123)) (ym-flow-lines st i a)
+              (or (= c 34) (= c 39)) (ym-quoted-lines st i a)
+              :else (ym-plain-lines st i a ind))))))
+
+;; the node whose first line is i (content at its indentation)
+(defn ym-node [st [:ref :kumitate/YS] i :i64 min :i64] [:ref :kumitate/YR]
+  (let [k (ym-skip st i)]
+    (cond (>= k (:n st)) (ym-r (y-null) k st)
+          (< (ym-ind st k) min) (ym-r (y-null) k st)
+          (ym-dash? st k) (ym-seq st k (ym-ind st k))
+          (= (ym-key-colon (:src st) (ym-cs st k) (ym-ce st k)) -2)
+            (ym-r (y-null) (+ k 1) (ym-fail st "yaml/complex-key-unsupported" k ""))
+          (ym-key-line? st k) (ym-map st k (ym-ind st k))
+          :else (ym-value st k (ym-cs st k) (- (ym-ind st k) 1)))))
+
+(defn ym-seq [st0 [:ref :kumitate/YS] i0 :i64 ind :i64] [:ref :kumitate/YR]
+  (loop [st st0 i i0 acc (ym-at-line (y-seq) i0)]
+    (let [k (ym-skip st i)]
+      (if (or (not (ym-ok? st)) (>= k (:n st)) (not (= (ym-ind st k) ind)) (not (ym-dash? st k)))
+        (ym-r acc k st)
+        (let [s (:src st) b (ym-ce st k) a (tx-skip-sp s (+ (ym-cs st k) 1) b)
+              r (cond (>= a b) (ym-value st k a ind)
+                      (or (>= (ym-key-colon s a b) 0)
+                          (and (= (tx-cp s a) 45) (or (= (+ a 1) b) (tx-space? (tx-cp s (+ a 1))))))
+                        (let [st2 (ym-shift st k a) r2 (ym-node st2 k 0)]
+                          ;; give the line back its own start for later readers
+                          (ym-r (:node r2) (:pos r2) (assoc (:st r2) :lines (:lines st))))
+                      :else (ym-value st k a ind))]
+          (recur (:st r) (:pos r) (y-add acc (:node r))))))))
+
+(defn ym-map [st0 [:ref :kumitate/YS] i0 :i64 ind :i64] [:ref :kumitate/YR]
+  (loop [st st0 i i0 acc (ym-at-line (y-map) i0) merges (y-list)]
+    (let [k (ym-skip st i)]
+      (if (or (not (ym-ok? st)) (>= k (:n st)) (not (= (ym-ind st k) ind)) (ym-dash? st k))
+        (let [m (ym-merge acc merges)]
+          (if (tx-empty? (:err m)) (ym-r (:node m) k st)
+            (ym-r acc k (ym-fail st (:err m) i0 ""))))
+        (let [s (:src st) a (ym-cs st k) b (ym-ce st k) c (ym-key-colon s a b)]
+          (cond (= c -2) (ym-r acc k (ym-fail st "yaml/complex-key-unsupported" k ""))
+                (< c 0) (ym-r acc k (ym-fail st "yaml/bad-indent" k (ym-content st k)))
+                :else
+                  (let [kq (tx-cp s a)
+                        key (if (or (= kq 34) (= kq 39))
+                              (:text (:node (ym-quoted s a (tx-rtrim-at s a c))))
+                              (tx-sub s a (tx-rtrim-at s a c)))
+                        r (ym-value st k (tx-skip-sp s (+ c 1) b) ind)]
+                    (cond (string=? key "<<") (recur (:st r) (:pos r) acc (conj merges (:node r)))
+                          (y-has? acc key) (ym-r acc k (ym-fail st "yaml/duplicate-key" k key))
+                          :else (recur (:st r) (:pos r) (y-put acc key (:node r)) merges)))))))))
+;; merge keys: each merged map's keys that m does not write itself
+(defn ym-merge [m [:ref :kumitate/Y] merges [:list [:ref :kumitate/Y]]] [:ref :kumitate/FR]
+  (loop [j 0 acc m]
+    (if (>= j (count merges)) (->FR acc 0 "")
+      (let [src (nth merges j)]
+        (cond (y-map? src) (recur (+ j 1) (ym-merge-one acc src))
+              (y-seq? src) (let [inner (loop [q 0 a2 acc ok true]
+                                         (cond (>= q (y-n src)) (->FR a2 0 (if ok "" "yaml/bad-merge"))
+                                               (y-map? (y-at src q)) (recur (+ q 1) (ym-merge-one a2 (y-at src q)) ok)
+                                               :else (recur (+ q 1) a2 false)))]
+                             (if (tx-empty? (:err inner)) (recur (+ j 1) (:node inner)) inner))
+              :else (->FR acc 0 "yaml/bad-merge"))))))
+(defn ym-merge-one [m [:ref :kumitate/Y] src [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (loop [q 0 acc m]
+    (cond (>= q (y-n src)) acc
+          (y-has? acc (y-key src q)) (recur (+ q 1) acc)
+          :else (recur (+ q 1) (y-put acc (y-key src q) (y-at src q))))))
+
+;; ---------------------------------------------------------------------------
+;; Documents
+
+;; the first content line after the directives and a leading ---
+(defn ym-doc-start [st [:ref :kumitate/YS]] :i64
+  (loop [k (ym-skip st 0)]
+    (cond (>= k (:n st)) k
+          (tx-starts? (ym-content st k) "%") (recur (ym-skip st (+ k 1)))
+          (tx-eq (ym-content st k) "---") (ym-skip st (+ k 1))
+          :else k)))
+(defn ym-doc-marker? [st [:ref :kumitate/YS] k :i64] :bool
+  (and (= (ym-ind st k) 0) (or (tx-eq (ym-content st k) "---") (tx-starts? (ym-content st k) "--- "))))
+
+;; parse s: the root node, or an error in the state (code, line, message)
+(defn ym-parse [s :string] [:ref :kumitate/YR]
+  (let [st (ym-state s)
+        tab (loop [k 0] (cond (>= k (:n st)) -1
+                              (and (< (ym-rs st k) (ym-re st k)) (= (tx-cp s (ym-rs st k)) 9)
+                                   (< (tx-skip-sp s (ym-rs st k) (ym-re st k)) (ym-re st k))) k
+                              :else (recur (+ k 1))))
+        dash (loop [k (+ (ym-doc-start st) 1)] (cond (>= k (:n st)) -1 (ym-doc-marker? st k) k :else (recur (+ k 1))))
+        start (ym-doc-start st)]
+    (cond (>= tab 0) (ym-r (y-null) 0 (ym-fail st "yaml/tab-indent" tab "a tab in the indentation"))
+          (>= dash 0) (ym-r (y-null) 0 (ym-fail st "yaml/multi-document" dash "a second document"))
+          (>= start (:n st)) (ym-r (y-null) 0 (ym-fail st "yaml/empty" 0 "no content"))
+          :else (let [r (ym-node st start 0)
+                      k (ym-skip (:st r) (:pos r))]
+                  (cond (not (ym-ok? (:st r))) r
+                        (and (< k (:n st)) (not (tx-eq (ym-content st k) "...")))
+                          (ym-r (:node r) k (ym-fail (:st r) "yaml/bad-indent" k (ym-content st k)))
+                        :else r)))))

@@ -1,0 +1,35 @@
+version: 2
+jobs:
+  rspec:
+    environment:
+      TZ: Asia/Tokyo
+      RAILS_ENV: test
+    working_directory: ~/repo
+    docker:
+      - image: cimg/ruby:3.3
+    steps:
+      - checkout
+      - run: bundle exec rspec
+  deploy:
+    working_directory: ~/repo
+    docker:
+      - image: cimg/ruby:3.3
+    environment:
+      RAILS_ENV: test
+      TZ: UTC
+    steps:
+      - checkout
+      - run: |
+          bundle exec cap production deploy
+          echo "deployed: done"
+workflows:
+  version: 2
+  ci:
+    jobs:
+      - rspec
+      - deploy:
+          requires:
+            - rspec
+          filters:
+            branches:
+              only: main

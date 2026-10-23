@@ -1,0 +1,74 @@
+# kotoba-lang/amu's selfhost bootstrap and kumitate's own native gate, written
+# as a CircleCI config: the pinned Amu-native root builds S1, S1 builds S2, S2
+# builds S3 (S2 = S3 is the fixed point), then each Kotoba gate is compiled by
+# the root into a loaderless static image and run on arm64 and x86_64.
+# The commands are the ones the evidence files record (amu
+# docs/evidence/tcp-spawn-native-20261023, this repo's docs/evidence).
+version: 2.1
+parameters:
+  amu-commit:
+    type: string
+    default: 457042ab741520980bceb5bf12970937d1bc8dba
+executors:
+  arm64:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: arm.medium
+  amd64:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: medium
+commands:
+  build-stage:
+    parameters:
+      compiler:
+        type: string
+      out:
+        type: string
+    steps:
+      - run:
+          name: << parameters.compiler >> builds << parameters.out >>
+          command: |
+            ./bootstrap/<< parameters.compiler >>.elf compile bootstrap/selfhost-unity.kotoba \
+              --target aarch64-linux --output bootstrap/<< parameters.out >>.elf --format static
+jobs:
+  bootstrap:
+    executor: arm64
+    steps:
+      - checkout
+      - run: git -C amu checkout << pipeline.parameters.amu-commit >>
+      - build-stage: {compiler: previous-root, out: S1}
+      - build-stage: {compiler: S1, out: S2}
+      - build-stage: {compiler: S2, out: S3}
+      - run:
+          name: fixed point
+          command: test "$(sha256sum < bootstrap/S2.elf)" = "$(sha256sum < bootstrap/S3.elf)"
+      - persist_to_workspace:
+          root: bootstrap
+          paths: [S3.elf]
+  gate:
+    parameters:
+      arch:
+        type: executor
+      target:
+        type: enum
+        enum: [aarch64-linux, x86_64-linux]
+    executor: << parameters.arch >>
+    steps:
+      - checkout
+      - attach_workspace: {at: bootstrap}
+      - run: ./bootstrap/S3.elf compile build/gate.kotoba --target << parameters.target >> --output build/gate.elf --format static
+      - run: KEXE_STRUCTURED_REPORT=1 ./build/gate.elf
+workflows:
+  selfhost:
+    jobs:
+      - bootstrap
+      - gate:
+          requires: [bootstrap]
+          matrix:
+            parameters:
+              arch: [arm64, amd64]
+              target: [aarch64-linux, x86_64-linux]
+            exclude:
+              - {arch: arm64, target: x86_64-linux}
+              - {arch: amd64, target: aarch64-linux}

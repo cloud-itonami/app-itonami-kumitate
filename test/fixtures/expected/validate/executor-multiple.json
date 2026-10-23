@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"config/job-executor-multiple","path":"jobs.a","message":"a job names exactly one of docker, machine, macos, executor"},{"code":"config/job-executor-missing","path":"jobs.b","message":"a job names one of docker, machine, macos, executor"},{"code":"config/executor-unknown","path":"jobs.c.executor","message":"no executor `nowhere`"}],"warnings":[]}

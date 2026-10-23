@@ -1,0 +1,291 @@
+# Clojure CircleCI 2.0 configuration file
+#
+# Check https://circleci.com/docs/2.0/language-clojure/ for more details
+#
+version: 2.1
+jobs:
+  testjvm:
+    docker:
+      # specify the version you desire here
+      - image: circleci/clojure:lein-2.9.1
+    working_directory: ~/repo
+    environment:
+      LEIN_ROOT: "true"
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "project.clj" }}
+            # fallback to using the latest cache if no exact match is found
+            - v1-dependencies-
+      - run:
+          name: Install Clojure
+          command: |
+            wget -nc https://download.clojure.org/install/linux-install-1.11.1.1347.sh
+            chmod +x linux-install-1.11.1.1347.sh
+            sudo ./linux-install-1.11.1.1347.sh
+      - run:
+          name: Run JVM tests
+          command: |
+            script/test
+      # - run:
+      #     name: Run as tools.deps dependency
+      #     command: |
+      #       .circleci/script/tools.deps
+      - run:
+          name: Run as lein command
+          command: |
+            .circleci/script/lein
+      - save_cache:
+          paths:
+            - ~/.m2
+          key: v1-dependencies-{{ checksum "project.clj" }}
+  buildlinux:
+    docker:
+      - image: circleci/clojure:openjdk-11-lein-2.9.8-bullseye
+    working_directory: ~/repo
+    environment:
+      LEIN_ROOT: "true"
+      GRAALVM_VERSION: "25.0.4"
+      GRAALVM_HOME: /home/circleci/graalvm-25.0.4
+      JET_PLATFORM: linux # used in release script
+      JET_TEST_ENV: native
+      BABASHKA_STATIC: "true"
+      BABASHKA_MUSL: "true"
+
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - buildlinux-{{ checksum "project.clj" }}-{{ checksum ".circleci/config.yml" }}
+      - run:
+          name: Install Clojure
+          command: |
+            wget https://download.clojure.org/install/linux-install-1.11.1.1347.sh
+            chmod +x linux-install-1.11.1.1347.sh
+            sudo ./linux-install-1.11.1.1347.sh
+      - run:
+          name: Install native dev tools
+          command: |
+            # bullseye is EOL, its security repo is dead
+            sudo sed -i '/bullseye-security/d' /etc/apt/sources.list
+            sudo apt-get -o Acquire::Check-Valid-Until=false update
+            sudo apt-get -y install build-essential zlib1g-dev
+            sudo -E script/setup-musl
+      - run:
+          name: Download GraalVM
+          command: |
+            script/install-graalvm
+      - run:
+          name: Build binary
+          command: |
+            script/compile
+          no_output_timeout: 30m
+      - run:
+          name: Run tests
+          command: |
+            script/test
+      # - run:
+      #     name: Performance report
+      #     command: |
+      #       .circleci/script/performance
+      - run:
+          name: Install bb
+          command: |
+            sudo bash < <(curl -s https://raw.githubusercontent.com/babashka/babashka/master/install)
+      - run:
+          name: Release
+          command: |
+            .circleci/script/release
+      - save_cache:
+          paths:
+            - ~/.m2
+            - ~/graalvm-25.0.4
+          key: buildlinux-{{ checksum "project.clj" }}-{{ checksum ".circleci/config.yml" }}
+      - store_artifacts:
+          path: /tmp/release
+          destination: release
+  buildmac:
+    macos:
+      xcode: "14.3.1"
+    resource_class: m4pro.medium
+    environment:
+      GRAALVM_VERSION: "25.0.1" # last GraalVM with macos-x64 builds
+      GRAALVM_HOME: /Users/distiller/graalvm-25.0.1/Contents/Home
+      JET_PLATFORM: macos # used in release script
+      JET_TEST_ENV: native
+      MACOSX_DEPLOYMENT_TARGET: "10.13"
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - buildmac-{{ checksum "project.clj" }}-{{ checksum ".circleci/config.yml" }}
+      - run:
+          name: Install Rosetta
+          command: |
+            sudo /usr/sbin/softwareupdate --install-rosetta --agree-to-license
+      - run:
+          name: Install Clojure
+          command: |
+            .circleci/script/install-clojure /usr/local
+      - run:
+          name: Install Leiningen
+          command: |
+            .circleci/script/install-leiningen
+
+      - run:
+          name: Download GraalVM
+          command: |
+            script/install-graalvm
+      - run:
+          name: Build binary
+          command: |
+            script/compile
+          no_output_timeout: 30m
+      - run:
+          name: Run tests
+          command: |
+            script/test
+      # - run:
+      #     name: Performance report
+      #     command: |
+      #       .circleci/script/performance
+      - run:
+          name: Install bb
+          command: |
+            sudo bash < <(curl -s https://raw.githubusercontent.com/babashka/babashka/master/install)
+      - run:
+          name: Release
+          command: |
+            sudo bash < <(curl -s https://raw.githubusercontent.com/babashka/babashka/master/install)
+            .circleci/script/release
+
+      - save_cache:
+          paths:
+            - ~/.m2
+            - ~/graalvm-25.0.1
+          key: buildmac-{{ checksum "project.clj" }}-{{ checksum ".circleci/config.yml" }}
+      - store_artifacts:
+          path: /tmp/release
+          destination: release
+  buildlinux-aarch64:
+    machine:
+      enabled: true
+      image: ubuntu-2004:current
+    resource_class: arm.medium
+    working_directory: ~/repo
+    environment:
+      LEIN_ROOT: "true"
+      GRAALVM_VERSION: "25.0.4"
+      GRAALVM_HOME: /home/circleci/graalvm-25.0.4
+      JET_PLATFORM: linux # used in release script
+      JET_ARCH: aarch64
+      JET_TEST_ENV: native
+      BABASHKA_STATIC: "true"
+
+    steps:
+      - checkout
+      - run:
+          name: Check max glibc version
+          command: script/check_glibc.sh
+      - restore_cache:
+          keys:
+            - buildlinux-aarch64-{{ checksum "project.clj" }}-{{ checksum ".circleci/config.yml" }}
+      - run:
+          name: Install Clojure
+          command: |
+            wget https://download.clojure.org/install/linux-install-1.11.1.1347.sh
+            chmod +x linux-install-1.11.1.1347.sh
+            sudo ./linux-install-1.11.1.1347.sh
+      - run:
+          name: Install native dev tools
+          command: |
+            sudo apt-get update
+            sudo apt-get -y install build-essential zlib1g-dev
+      - run:
+          name: Download GraalVM
+          command: |
+            script/install-graalvm
+      - run:
+          name: Build binary
+          command: |
+            script/compile
+          no_output_timeout: 30m
+      - run:
+          name: Run tests
+          command: |
+            script/test
+      # - run:
+      #     name: Performance report
+      #     command: |
+      #       .circleci/script/performance
+      - run:
+          name: Install bb
+          command: |
+            sudo bash < <(curl -s https://raw.githubusercontent.com/babashka/babashka/master/install)
+      - run:
+          name: Release
+          command: |
+            .circleci/script/release
+      - save_cache:
+          paths:
+            - ~/.m2
+            - ~/graalvm-25.0.4
+          key: buildlinux-aarch64-{{ checksum "project.clj" }}-{{ checksum ".circleci/config.yml" }}
+      - store_artifacts:
+          path: /tmp/release
+          destination: release
+  deploy:
+    docker:
+      - image: circleci/clojure:lein-2.9.1
+    working_directory: ~/repo
+    environment:
+      LEIN_ROOT: "true"
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "project.clj" }}
+            #  fallback to using the latest cache if no exact match is found
+            - v1-dependencies-
+      - run: .circleci/script/deploy
+      - save_cache:
+          paths:
+            - ~/.m2
+          key: v1-dependencies-{{ checksum "project.clj" }}
+  # docker:
+  #   docker:
+  #     - image: circleci/buildpack-deps:stretch
+  #   steps:
+  #     - checkout
+  #     - setup_remote_docker:
+  #         docker_layer_caching: true
+  #     - run:
+  #         name: Build Docker image
+  #         command: .circleci/script/docker
+
+workflows:
+  version: 2
+  ci:
+    jobs:
+      - testjvm
+      - buildlinux
+      - buildlinux-aarch64
+      - buildmac
+      - deploy:
+          filters:
+            branches:
+              only: master
+          requires:
+            - testjvm
+            - buildlinux
+            - buildlinux-aarch64
+            - buildmac
+      # - docker:
+      #     filters:
+      #       branches:
+      #         only: master
+      #     requires:
+      #       - testjvm
+      #       - buildlinux
+      #       - buildmac

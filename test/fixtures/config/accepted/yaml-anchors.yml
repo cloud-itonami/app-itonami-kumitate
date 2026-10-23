@@ -1,0 +1,37 @@
+# YAML the way many real configs share settings: a top-level key that only
+# holds anchors, merge keys (written keys win) and aliases.
+version: 2.1
+defaults: &defaults
+  working_directory: ~/repo
+  docker:
+    - image: cimg/ruby:3.3
+  environment: &env
+    RAILS_ENV: test
+    TZ: UTC
+filters-main: &main-only
+  filters:
+    branches:
+      only: main
+jobs:
+  rspec:
+    <<: *defaults
+    environment:
+      <<: *env
+      TZ: Asia/Tokyo
+    steps:
+      - checkout
+      - run: bundle exec rspec
+  deploy:
+    <<: *defaults
+    steps:
+      - checkout
+      - run: |
+          bundle exec cap production deploy
+          echo "deployed: done"
+workflows:
+  ci:
+    jobs:
+      - rspec
+      - deploy:
+          requires: [rspec]
+          <<: *main-only

@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"config/filter-expression","path":"workflows.w.jobs[0].a.filters","message":"expr/syntax: pipeline.git.branch == \"main\" and"},{"code":"config/filter-expression","path":"workflows.w.jobs[1].b.filters","message":"expr/unknown-name: branch == \"main\""}],"warnings":[]}

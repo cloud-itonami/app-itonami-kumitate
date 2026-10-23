@@ -1,0 +1,93 @@
+;; 26-emit (prefix ye-): Y -> YAML text, two-space block style. ym-parse reads
+;; the text back to an equal Y (strings stay strings: a string that would read
+;; as true, null or a number is quoted).
+
+(defn ye-indicator? [c :i64] :bool
+  (or (= c 45) (= c 63) (= c 58) (= c 44) (= c 91) (= c 93) (= c 123) (= c 125) (= c 35) (= c 38)
+      (= c 42) (= c 33) (= c 124) (= c 62) (= c 39) (= c 34) (= c 37) (= c 64) (= c 96)))
+;; can t be written plain and read back as the same text?
+(defn ye-plain-ok? [t :string] :bool
+  (let [n (tx-len t)]
+    (and (> n 0)
+         (not (ye-indicator? (tx-cp t 0)))
+         (not (tx-space? (tx-cp t 0)))
+         (not (tx-space? (tx-cp t (- n 1))))
+         (not (tx-has? t ": "))
+         (not (tx-has? t " #"))
+         (not (tx-ends? t ":"))
+         (not (tx-has? t "\n"))
+         (not (tx-has? t "\t"))
+         (not (tx-has? t "\r"))
+         (not (tx-starts? t "<< "))
+         (not (tx-eq t "<<")))))
+;; would a plain t be read as something other than a string?
+(defn ye-typed? [t :string] :bool
+  (or (ym-null-text? t) (tx-eq t "true") (tx-eq t "false") (tx-eq t "True") (tx-eq t "False")
+      (tx-eq t "yes") (tx-eq t "no") (tx-eq t "on") (tx-eq t "off")
+      (js-number? t) (tx-int? t)
+      (and (> (tx-len t) 0) (or (tx-digit? (tx-cp t 0)) (= (tx-cp t 0) 46)) (js-number? (tx-cat "0" (tx-replace-all t "_" ""))))))
+(defn ye-key [k :string] :string (if (and (ye-plain-ok? k) (not (ye-typed? k))) k (tx-json-str k)))
+(defn ye-scalar [y [:ref :kumitate/Y]] :string
+  (let [t (:text y)]
+    (cond (= (:kind y) 0) "null"
+          (= (:kind y) 1) (if (ye-plain-ok? t) t (tx-json-str t))
+          (and (ye-plain-ok? t) (not (ye-typed? t))) t
+          :else (tx-json-str t))))
+(defn ye-spaces [n :i64] :string (loop [i 0 s ""] (if (< i n) (recur (+ i 1) (tx-cat s " ")) s)))
+;; a multi-line string as a literal block: the header and the lines, or "" when
+;; it cannot be one (a first line that starts with a space, a \r or a tab start)
+(defn ye-block-ok? [t :string] :bool
+  (and (tx-has? t "\n") (not (tx-has? t "\r")) (not (tx-space? (tx-cp t 0)))
+       (not (tx-ends? t " ")) (not (tx-has? t " \n"))))
+(defn ye-block [t :string ind :i64] [:list :string]
+  (let [core (loop [b t] (if (tx-ends? b "\n") (recur (tx-sub b 0 (- (tx-len b) 1))) b))
+        trailing (- (tx-len t) (tx-len core))
+        hdr (cond (= trailing 0) "|-" (= trailing 1) "|" :else "|+")
+        pad (ye-spaces ind)
+        lines (tx-split core "\n")
+        body (loop [i 0 acc (conj (tx-strs) hdr)]
+               (if (>= i (count lines)) acc
+                 (recur (+ i 1) (conj acc (if (tx-empty? (nth lines i)) "" (tx-cat pad (nth lines i)))))))]
+    (loop [k 1 acc body] (if (< k trailing) (recur (+ k 1) (conj acc "")) acc))))
+
+(defn ye-lines [y [:ref :kumitate/Y] ind :i64] [:list :string]
+  (let [pad (ye-spaces ind)]
+    (cond (y-map? y)
+            (if (= (y-n y) 0) (conj (tx-strs) (tx-cat pad "{}"))
+              (loop [i 0 acc (tx-strs)]
+                (if (>= i (y-n y)) acc
+                  (let [k (tx-cat3 pad (ye-key (y-key y i)) ":") v (y-at y i)]
+                    (recur (+ i 1) (ye-append acc (ye-under k v ind)))))))
+          (y-seq? y)
+            (if (= (y-n y) 0) (conj (tx-strs) (tx-cat pad "[]"))
+              (loop [i 0 acc (tx-strs)]
+                (if (>= i (y-n y)) acc
+                  (let [v (y-at y i)
+                        sub (cond (and (y-scalar? v) (= (:kind v) 2) (ye-block-ok? (:text v)))
+                                    (let [b (ye-block (:text v) (+ ind 2))]
+                                      (ye-prefix-first b (tx-cat pad "- ") 0))
+                                  (or (and (y-map? v) (> (y-n v) 0)) (and (y-seq? v) (> (y-n v) 0)))
+                                    (ye-prefix-first (ye-lines v (+ ind 2)) (tx-cat pad "- ") (+ ind 2))
+                                  (y-map? v) (conj (tx-strs) (tx-cat pad "- {}"))
+                                  (y-seq? v) (conj (tx-strs) (tx-cat pad "- []"))
+                                  :else (conj (tx-strs) (tx-cat3 pad "- " (ye-scalar v))))]
+                    (recur (+ i 1) (ye-append acc sub))))))
+          :else (conj (tx-strs) (tx-cat pad (ye-scalar y))))))
+;; "key:" and the value under it
+(defn ye-under [k :string v [:ref :kumitate/Y] ind :i64] [:list :string]
+  (cond (and (y-map? v) (> (y-n v) 0)) (ye-append (conj (tx-strs) k) (ye-lines v (+ ind 2)))
+        (and (y-seq? v) (> (y-n v) 0)) (ye-append (conj (tx-strs) k) (ye-lines v (+ ind 2)))
+        (y-map? v) (conj (tx-strs) (tx-cat k " {}"))
+        (y-seq? v) (conj (tx-strs) (tx-cat k " []"))
+        (y-null? v) (conj (tx-strs) (tx-cat k " null"))
+        (and (= (:kind v) 2) (ye-block-ok? (:text v)))
+          (let [b (ye-block (:text v) (+ ind 2))] (ye-prefix-first b (tx-cat k " ") 0))
+        :else (conj (tx-strs) (tx-cat3 k " " (ye-scalar v)))))
+(defn ye-append [a [:list :string] b [:list :string]] [:list :string]
+  (loop [i 0 acc a] (if (< i (count b)) (recur (+ i 1) (conj acc (nth b i))) acc)))
+;; the first line with its leading `drop` spaces replaced by prefix
+(defn ye-prefix-first [ls [:list :string] prefix :string drop :i64] [:list :string]
+  (loop [i 0 acc (tx-strs)]
+    (if (>= i (count ls)) acc
+      (recur (+ i 1) (conj acc (if (= i 0) (tx-cat prefix (tx-from (nth ls 0) drop)) (nth ls i)))))))
+(defn ye-emit [y [:ref :kumitate/Y]] :string (tx-cat (tx-join (ye-lines y 0) "\n") "\n"))

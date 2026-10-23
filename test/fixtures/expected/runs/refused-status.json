@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"runs/unknown-status","path":"jobs[0]","message":"`exploded` is not a CircleCI API v2 status"}],"warnings":[]}

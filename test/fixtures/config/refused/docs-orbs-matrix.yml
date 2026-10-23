@@ -1,0 +1,36 @@
+# The CircleCI docs "Using matrix jobs" example: it calls node/install from
+# the circleci/node orb, which kumitate never fetches.
+version: 2.1
+orbs:
+  node: circleci/node@4.7
+executors:
+  docker:
+    docker:
+      - image: cimg/base:stable
+  linux:
+    machine:
+      image: ubuntu-2404:current
+  macos:
+    macos:
+      xcode: 27.1.0
+jobs:
+  test:
+    parameters:
+      os:
+        type: executor
+      node-version:
+        type: string
+    executor: << parameters.os >>
+    steps:
+      - checkout
+      - node/install:
+          node-version: << parameters.node-version >>
+          install-yarn: true
+workflows:
+  all-tests:
+    jobs:
+      - test:
+          matrix:
+            parameters:
+              os: [docker, linux, macos]
+              node-version: ["14.17.6", "16.9.0"]

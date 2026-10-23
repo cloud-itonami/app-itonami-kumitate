@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="pytest">
+  <testsuite name="api" tests="4" failures="1" errors="0" skipped="1" time="3.6">
+    <testcase classname="tests.test_api" name="test_list" time="0.120"/>
+    <testcase classname="tests.test_api" name="test_create" time="1.5">
+      <failure message="AssertionError: 201 != 500">Traceback (most recent call last):
+  assert r.status == 201</failure>
+    </testcase>
+    <testcase classname="tests.test_api" name="test_delete" time="0.04"><skipped message="needs db"/></testcase>
+    <testcase classname="tests.test_auth" name="test_login &amp; logout" time="1.94"/>
+  </testsuite>
+</testsuites>

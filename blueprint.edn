@@ -1,0 +1,27 @@
+{:itonami.blueprint/id "app-itonami-kumitate"
+ :itonami.blueprint/name "kumitate — CircleCI-compatible pipeline planning, user-local"
+ :itonami.blueprint/domain :software/ci-cd
+ :itonami.blueprint/license "AGPL-3.0-or-later"
+ :itonami.blueprint/social-impact [:data-sovereignty :self-hosting :vendor-lock-in-exit]
+ :itonami.blueprint/robotics false
+ :itonami.blueprint/required-technologies [:kotoba-native :amu-selfhost]
+ :itonami.blueprint/status :public-oss
+ :itonami.blueprint/maturity :core-only
+ ;; 公開先の予定は app.itonami.cloud/kumitate/（network-awai/cloud-itonami の sites.edn、app org）。
+ ;; ブラウザで動く産物がまだ無いので、sites.edn には載せていない（docs/aiueos-dapp.md）。
+ ;; :endpoint は書かない。kumitate は利用者の手元で動く道具で、呼び出せる actor ではない。
+ :itonami.blueprint/org "app"
+ :itonami.blueprint/compat
+ {:target "CircleCI"
+  :scope :data-format
+  :network false
+  :formats [:circleci-config-2.1 :circleci-api-v2-pipeline-workflow-job :junit-xml]
+  :note "CircleCI にも VCS にも接続しない（kotoba-client-runtime ブローカー未着地）。orbs・functions は取得せず名前付きで拒否する。互換は config の意味と API の形で、CircleCI の実行基盤の再現ではない。"}
+ :itonami.blueprint/implementation
+ {:language :kotoba
+  :target :aarch64-linux-static-and-x86_64-linux-static
+  :guest "kotoba/kumitate (GATE-MANIFEST の pure module)"
+  :descriptor "aiueos/kumitate.edn"
+  :ui :blocked-on-selfhost-wasm32-browser
+  :mcp :streamable-http-native-tcp
+  :capabilities []}}

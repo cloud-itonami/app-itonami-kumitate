@@ -1,0 +1,165 @@
+;; 55-out (prefix po-): what a plan is shown as. The plan as JSON-shaped Y,
+;; the processed config (CircleCI's `config process` shape, version 2), and the
+;; local run plan: the steps of each job in order, for the user's own machine.
+;; Nothing here runs a step.
+
+(defn po-diag [d [:ref :kumitate/D]] [:ref :kumitate/Y]
+  (-> (y-map) (y-put "code" (y-str (:code d))) (y-put "path" (y-str (:path d))) (y-put "message" (y-str (:msg d)))))
+(defn po-diags [ds [:list [:ref :kumitate/D]] level :i64] [:ref :kumitate/Y]
+  (loop [i 0 acc (y-seq)]
+    (if (>= i (count ds)) acc
+      (recur (+ i 1) (if (= (:level (nth ds i)) level) (y-add acc (po-diag (nth ds i))) acc)))))
+(defn po-check-y [ds0 [:list [:ref :kumitate/D]]] [:ref :kumitate/Y]
+  (let [ds (d-dedupe ds0)]
+  (-> (y-map) (y-put "valid" (y-bool (= (d-errors ds) 0)))
+      (y-put "errors" (po-diags ds 2)) (y-put "warnings" (po-diags ds 1)))))
+
+(defn po-executor [body [:ref :kumitate/Y] type :string] :string
+  (let [d (y-get body "docker") m (y-get body "machine") x (y-get body "macos")]
+    (cond (or (tx-eq type "approval") (tx-eq type "no-op")) "none"
+          (y-seq? d) (tx-cat "docker:" (:text (y-get (y-at d 0) "image")))
+          (y-map? m) (if (y-has? m "image") (tx-cat "machine:" (:text (y-get m "image"))) "machine")
+          (y-true? m) "machine"
+          (y-map? x) (tx-cat "macos:xcode-" (:text (y-get x "xcode")))
+          :else "unknown")))
+(defn po-strs [xs [:list :string]] [:ref :kumitate/Y]
+  (loop [i 0 acc (y-seq)] (if (< i (count xs)) (recur (+ i 1) (y-add acc (y-str (nth xs i)))) acc)))
+(defn po-dep-names [w [:ref :kumitate/WP] ji [:ref :kumitate/JI]] [:list :string]
+  (loop [k 0 acc (tx-strs)]
+    (if (>= k (vector-count (:deps ji))) acc
+      (recur (+ k 1) (conj acc (:name (nth (:jobs w) (vector-at (:deps ji) k))))))))
+(defn po-job-y [w [:ref :kumitate/WP] ji [:ref :kumitate/JI]] [:ref :kumitate/Y]
+  (let [reqs (loop [k 0 acc (y-seq)]
+               (if (>= k (count (:reqs ji))) acc
+                 (recur (+ k 1) (y-add acc (-> (y-map) (y-put "name" (y-str (nth (:reqs ji) k)))
+                                               (y-put "status" (po-strs (tx-split (nth (:rstatus ji) k) ","))))))))
+        base (-> (y-map) (y-put "name" (y-str (:name ji))) (y-put "job" (y-str (:job ji))) (y-put "type" (y-str (:type ji)))
+                 (y-put "level" (y-int (:level ji))) (y-put "requires" reqs) (y-put "depends_on" (po-strs (po-dep-names w ji)))
+                 (y-put "run" (y-bool (:run ji))))
+        b2 (if (:run ji) base (y-put base "reason" (y-str (:reason ji))))
+        b3 (if (tx-empty? (:alias ji)) b2 (y-put b2 "alias" (y-str (:alias ji))))]
+    (-> b3 (y-put "parallelism" (y-int (:parallelism ji)))
+        (y-put "executor" (y-str (po-executor (:body ji) (:type ji))))
+        (y-put "steps" (y-int (y-n (y-get (:body ji) "steps"))))
+        (y-put-some "context" (:context ji)))))
+;; levels of the running jobs: [[names at level 0], [level 1], ..]
+(defn po-levels [w [:ref :kumitate/WP]] [:ref :kumitate/Y]
+  (let [maxl (loop [i 0 m -1] (if (< i (count (:jobs w))) (recur (+ i 1) (if (:run (nth (:jobs w) i)) (max m (:level (nth (:jobs w) i))) m)) m))]
+    (loop [l 0 acc (y-seq)]
+      (if (> l maxl) acc
+        (recur (+ l 1)
+          (y-add acc (loop [i 0 s (y-seq)]
+                       (if (>= i (count (:jobs w))) s
+                         (let [ji (nth (:jobs w) i)]
+                           (recur (+ i 1) (if (and (:run ji) (= (:level ji) l)) (y-add s (y-str (:name ji))) s)))))))))))
+(defn po-wf-y [w [:ref :kumitate/WP]] [:ref :kumitate/Y]
+  (let [lv (po-levels w)
+        width (loop [i 0 m 0] (if (< i (y-n lv)) (recur (+ i 1) (max m (y-n (y-at lv i)))) m))
+        containers (loop [l 0 m 0]
+                     (if (>= l (y-n lv)) m
+                       (recur (+ l 1)
+                         (max m (loop [i 0 s 0]
+                                  (if (>= i (count (:jobs w))) s
+                                    (let [ji (nth (:jobs w) i)]
+                                      (recur (+ i 1) (if (and (:run ji) (= (:level ji) l) (not (tx-eq (:type ji) "approval"))) (+ s (:parallelism ji)) s)))))))))
+        jobs (loop [i 0 acc (y-seq)] (if (< i (count (:jobs w))) (recur (+ i 1) (y-add acc (po-job-y w (nth (:jobs w) i)))) acc))
+        base (-> (y-map) (y-put "name" (y-str (:name w))) (y-put "run" (y-bool (:run w))))]
+    (-> (if (:run w) base (y-put base "reason" (y-str (:reason w))))
+        (y-put "levels" lv) (y-put "max_parallel_jobs" (y-int width)) (y-put "max_parallel_containers" (y-int containers))
+        (y-put "jobs" jobs))))
+(defn po-plan-y [pr [:ref :kumitate/PR]] [:ref :kumitate/Y]
+  (let [wfs (loop [i 0 acc (y-seq)] (if (< i (count (:workflows pr))) (recur (+ i 1) (y-add acc (po-wf-y (nth (:workflows pr) i)))) acc))
+        pipe (-> (y-map) (y-put "parameters" (:params pr))
+                 (y-put "branch" (if (tx-empty? (:branch pr)) (y-null) (y-str (:branch pr))))
+                 (y-put "tag" (if (tx-empty? (:tag pr)) (y-null) (y-str (:tag pr)))))]
+    (-> (po-check-y (:diags pr)) (y-put "pipeline" pipe) (y-put "workflows" wfs))))
+
+;; ---------------------------------------------------------------------------
+;; Processed config
+
+;; Two workflows may run one job with different arguments under one name; the
+;; processed config then names the second body NAME-2 (NAME-3, ..), as a job
+;; map cannot hold both. PK is one workflow's keys, parallel to its jobs.
+(defrecord PK [keys [:list :string]])
+(defrecord PKS [jobs [:ref :kumitate/Y] wfs [:list [:ref :kumitate/PK]]])
+(defn po-free-key [jobs [:ref :kumitate/Y] name :string body [:ref :kumitate/Y]] :string
+  (loop [n 1]
+    (let [k (if (= n 1) name (tx-cat3 name "-" (tx-istr n)))]
+      (cond (not (y-has? jobs k)) k
+            (y-equal? (y-get jobs k) body) k
+            :else (recur (+ n 1))))))
+(defn po-keys [pr [:ref :kumitate/PR]] [:ref :kumitate/PKS]
+  (loop [i 0 jobs (y-map) wfs (typed-list-new [:list [:ref :kumitate/PK]])]
+    (if (>= i (count (:workflows pr))) (->PKS jobs wfs)
+      (let [w (nth (:workflows pr) i)
+            r (loop [k 0 js jobs ks (tx-strs)]
+                (if (>= k (count (:jobs w))) (->PKS js (conj (typed-list-new [:list [:ref :kumitate/PK]]) (->PK ks)))
+                  (let [ji (nth (:jobs w) k)]
+                    (if (or (not (:run w)) (tx-eq (:type ji) "approval") (tx-eq (:type ji) "no-op"))
+                      (recur (+ k 1) js (conj ks (:name ji)))
+                      (let [key (po-free-key js (:name ji) (:body ji))]
+                        (recur (+ k 1) (if (y-has? js key) js (y-put js key (:body ji))) (conj ks key)))))))]
+        (recur (+ i 1) (:jobs r) (conj wfs (nth (:wfs r) 0)))))))
+(defn po-requires [w [:ref :kumitate/WP] ji [:ref :kumitate/JI] keys [:list :string]] [:ref :kumitate/Y]
+  (loop [k 0 acc (y-seq)]
+    (if (>= k (vector-count (:deps ji))) acc
+      (let [d (vector-at (:deps ji) k) dn (nth keys d) st (pl-dep-status (:jobs w) ji d)]
+        (recur (+ k 1) (y-add acc (if (tx-eq st "success") (y-str dn)
+                                    (y-put (y-map) dn (po-strs (tx-split st ","))))))))))
+(defn po-processed [pr [:ref :kumitate/PR]] [:ref :kumitate/Y]
+  (let [pk (po-keys pr)
+        wfs (loop [i 0 acc (y-put (y-map) "version" (y-plain "2"))]
+              (if (>= i (count (:workflows pr))) acc
+                (let [w (nth (:workflows pr) i) keys (:keys (nth (:wfs pk) i))]
+                  (recur (+ i 1)
+                    (if (not (:run w)) acc
+                      (y-put acc (:name w)
+                        (y-put (y-map) "jobs"
+                          (loop [k 0 s (y-seq)]
+                            (if (>= k (count (:jobs w))) s
+                              (let [ji (nth (:jobs w) k)
+                                    a0 (y-map)
+                                    a1 (if (> (vector-count (:deps ji)) 0) (y-put a0 "requires" (po-requires w ji keys)) a0)
+                                    a2 (if (or (tx-eq (:type ji) "approval") (tx-eq (:type ji) "no-op")) (y-put a1 "type" (y-str (:type ji))) a1)
+                                    a3 (if (y-null? (:filters ji)) a2 (y-put a2 "filters" (:filters ji)))
+                                    a4 (if (y-null? (:context ji)) a3 (y-put a3 "context" (:context ji)))]
+                                (recur (+ k 1) (y-add s (if (= (y-n a4) 0) (y-str (nth keys k)) (y-put (y-map) (nth keys k) a4))))))))))))))]
+    (-> (y-map) (y-put "version" (y-plain "2")) (y-put "jobs" (:jobs pk)) (y-put "workflows" wfs))))
+
+;; ---------------------------------------------------------------------------
+;; Local run plan
+
+(defn po-step [s [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (cond (y-scalar? s) (y-put (y-map) "kind" (y-str (:text s)))
+        :else
+          (let [k (y-key s 0) a (y-at s 0) base (y-put (y-map) "kind" (y-str k))]
+            (cond (and (tx-eq k "run") (y-scalar? a)) (y-put base "command" (y-str (:text a)))
+                  (tx-eq k "run")
+                    (loop [i 0 acc base] (if (< i (y-n a)) (recur (+ i 1) (y-put acc (y-key a i) (y-at a i))) acc))
+                  :else (y-put base "with" a)))))
+(defn po-local [pr [:ref :kumitate/PR]] [:ref :kumitate/Y]
+  (let [order (loop [i 0 acc (y-seq)]
+                (if (>= i (count (:workflows pr))) acc
+                  (let [w (nth (:workflows pr) i)
+                        maxl (loop [k 0 m -1] (if (< k (count (:jobs w))) (recur (+ k 1) (max m (:level (nth (:jobs w) k)))) m))]
+                    (recur (+ i 1)
+                      (loop [l 0 a2 acc]
+                        (if (> l maxl) a2
+                          (recur (+ l 1)
+                            (loop [k 0 a3 a2]
+                              (if (>= k (count (:jobs w))) a3
+                                (let [ji (nth (:jobs w) k)]
+                                  (recur (+ k 1)
+                                    (if (and (:run ji) (= (:level ji) l))
+                                      (y-add a3 (-> (y-map) (y-put "workflow" (y-str (:name w))) (y-put "job" (y-str (:name ji)))
+                                                    (y-put "level" (y-int l)) (y-put "type" (y-str (:type ji)))
+                                                    (y-put "after" (po-strs (po-dep-names w ji)))
+                                                    (y-put "executor" (y-str (po-executor (:body ji) (:type ji))))
+                                                    (y-put "parallelism" (y-int (:parallelism ji)))
+                                                    (y-put "environment" (y-get (:body ji) "environment"))
+                                                    (y-put "steps" (loop [q 0 s (y-seq)] (if (< q (y-n (y-get (:body ji) "steps"))) (recur (+ q 1) (y-add s (po-step (y-at (y-get (:body ji) "steps") q)))) s)))))
+                                      a3))))))))))))]
+    (-> (po-check-y (:diags pr))
+        (y-put "executes" (y-bool false))
+        (y-put "note" (y-str "A plan only. kumitate runs no step: running them is the user's own act on their own machine or browser worker, and any network operation needs the shared consent broker, which has not landed."))
+        (y-put "order" order))))

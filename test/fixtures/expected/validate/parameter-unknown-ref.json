@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"config/parameter-unknown","path":"jobs.a.steps[0].run","message":"<< parameters.nope >> names no parameter here"},{"code":"config/pipeline-parameter-unknown","path":"jobs.a.steps[0].run","message":"<< pipeline.parameters.missing >> names no pipeline parameter"}],"warnings":[]}

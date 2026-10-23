@@ -1,0 +1,426 @@
+;; 40-config (prefix cf-): the shape of a CircleCI config.yml (version 2.1),
+;; checked before anything is expanded. Every finding is a D with a named code.
+;;
+;; Refusals (level 2): config/not-a-mapping, config/version-missing,
+;; config/version-unsupported, config/orb-unresolved (orbs are never fetched),
+;; config/orb-inline-unsupported, config/function-unresolved (functions: are
+;; external code, never fetched), config/job-groups-unsupported,
+;; config/jobs-missing, config/workflows-missing, config/not-a-mapping-at,
+;; config/parameter-type, config/parameter-enum, config/parameter-default,
+;; config/executor-type, config/docker-image-missing, config/job-type,
+;; config/job-executor-missing, config/job-executor-multiple,
+;; config/executor-unknown, config/job-steps-missing, config/steps-not-a-list,
+;; config/step-shape, config/step-unknown, config/run-command-missing,
+;; config/logic-unknown, config/workflow-jobs-missing, config/job-unknown,
+;; config/workflow-job-shape, config/workflow-job-key, config/requires-shape,
+;; config/requires-status, config/matrix-shape, config/matrix-parameter-unknown,
+;; config/filter-shape, config/filter-expression, config/regex (with the regex/* code in the message),
+;; config/parameter-unknown, config/pipeline-parameter-unknown,
+;; config/parallelism, config/name-invalid.
+;; Warnings (level 1): config/unknown-key, config/workflows-version-ignored,
+;; config/scheduled-trigger, config/setup-workflow, config/deprecated-step.
+
+(defn cf-top-keys [] [:list :string]
+  (-> (tx-strs) (conj "version") (conj "setup") (conj "orbs") (conj "commands") (conj "parameters")
+      (conj "executors") (conj "jobs") (conj "workflows") (conj "circleci_ip_ranges")))
+(defn cf-job-keys [] [:list :string]
+  (-> (tx-strs) (conj "type") (conj "docker") (conj "machine") (conj "macos") (conj "executor") (conj "shell")
+      (conj "parameters") (conj "steps") (conj "working_directory") (conj "parallelism") (conj "environment")
+      (conj "resource_class") (conj "retention") (conj "circleci_ip_ranges") (conj "description")))
+(defn cf-builtin-steps [] [:list :string]
+  (-> (tx-strs) (conj "run") (conj "checkout") (conj "setup_remote_docker") (conj "save_cache") (conj "restore_cache")
+      (conj "with_tool_cache") (conj "store_artifacts") (conj "store_test_results") (conj "persist_to_workspace")
+      (conj "attach_workspace") (conj "add_ssh_keys") (conj "install_signing_bundle") (conj "when") (conj "unless")
+      (conj "deploy")))
+(defn cf-wf-job-keys [] [:list :string]
+  (-> (tx-strs) (conj "requires") (conj "name") (conj "context") (conj "type") (conj "filters") (conj "matrix")
+      (conj "pre-steps") (conj "post-steps") (conj "serial-group") (conj "override-with")))
+(defn cf-param-types [pipeline :bool] [:list :string]
+  (let [base (-> (tx-strs) (conj "string") (conj "boolean") (conj "integer") (conj "enum"))]
+    (if pipeline base (-> base (conj "executor") (conj "steps") (conj "env_var_name")))))
+(defn cf-statuses [] [:list :string]
+  (-> (tx-strs) (conj "success") (conj "failed") (conj "canceled") (conj "not_run")))
+
+(defn cf-path [p :string k :string] :string (if (tx-empty? p) k (tx-cat3 p "." k)))
+(defn cf-pathi [p :string i :i64] :string (tx-cat4 p "[" (tx-istr i) "]"))
+(defn cf-line [y [:ref :kumitate/Y]] :string (if (> (:line y) 0) (tx-cat " (line " (tx-cat (tx-istr (:line y)) ")")) ""))
+(defn cf-orb-ref? [name :string] :bool (tx-has? name "/"))
+;; the parameter name of a scalar that is exactly << parameters.NAME >>, or ""
+(defn cf-param-ref [y [:ref :kumitate/Y] scope :string] :string
+  (if (not (y-scalar? y)) ""
+    (let [t (tx-trim (:text y)) pre (tx-cat scope ".")]
+      (if (and (tx-starts? t "<<") (tx-ends? t ">>"))
+        (let [inner (tx-trim (tx-sub t 2 (- (tx-len t) 2)))]
+          (if (and (tx-starts? inner pre) (not (tx-has? (tx-from inner (tx-len pre)) "<<"))) (tx-from inner (tx-len pre)) ""))
+        ""))))
+(defn cf-name-ok? [s :string] :bool
+  (and (> (tx-len s) 0)
+       (loop [i 0] (cond (>= i (tx-len s)) true
+                         (let [c (tx-cp s i)] (or (tx-alpha? c) (tx-digit? c) (= c 45) (= c 95) (= c 46))) (recur (+ i 1))
+                         :else false))))
+
+;; ---------------------------------------------------------------------------
+;; Parameters
+
+;; declarations at path p (a map of name -> {type, default, enum, description})
+(defn cf-params [ps [:ref :kumitate/Y] p :string pipeline :bool] [:list [:ref :kumitate/D]]
+  (cond (y-null? ps) (d-list)
+        (not (y-map? ps)) (conj (d-list) (d-err "config/not-a-mapping-at" p (tx-cat "parameters must be a mapping" (cf-line ps))))
+        :else
+          (loop [i 0 ds (d-list)]
+            (if (>= i (y-n ps)) ds
+              (let [name (y-key ps i) d (y-at ps i) q (cf-path p name)
+                    ty (y-get d "type") t (:text ty) df (y-get d "default")]
+                (recur (+ i 1)
+                  (cond (not (cf-name-ok? name)) (conj ds (d-err "config/name-invalid" q name))
+                        (not (y-map? d)) (conj ds (d-err "config/parameter-type" q "a parameter is a mapping with a type"))
+                        (not (tx-member? (cf-param-types pipeline) t))
+                          (conj ds (d-err "config/parameter-type" q (tx-cat3 "type `" t (if pipeline "` (pipeline parameters take string, boolean, integer, enum)" "` is not a parameter type"))))
+                        (and (tx-eq t "enum") (or (not (y-seq? (y-get d "enum"))) (= (y-n (y-get d "enum")) 0)))
+                          (conj ds (d-err "config/parameter-enum" q "an enum parameter lists its values under enum"))
+                        (and (not (y-null? df)) (not (tx-empty? (cf-default-problem t d df))))
+                          (conj ds (d-err "config/parameter-default" q (cf-default-problem t d df)))
+                        :else ds)))))))
+;; why the value v does not fit a parameter of type t (declaration d), or ""
+(defn cf-default-problem [t :string d [:ref :kumitate/Y] v [:ref :kumitate/Y]] :string
+  (cond (tx-eq t "boolean") (if (y-bool? v) "" (tx-cat3 "`" (:text v) "` is not true or false"))
+        (tx-eq t "integer") (if (y-intv? v) "" (tx-cat3 "`" (:text v) "` is not an integer"))
+        (tx-eq t "enum") (if (and (y-scalar? v) (cf-enum-has? (y-get d "enum") (:text v))) ""
+                           (tx-cat3 "`" (:text v) "` is not one of the enum values"))
+        (tx-eq t "steps") (if (y-seq? v) "" "a steps value is a list of steps")
+        (tx-eq t "executor") (if (or (y-scalar? v) (y-map? v)) "" "an executor value is a name or {name: ..}")
+        (tx-eq t "env_var_name") (if (and (y-scalar? v) (cf-env-name? (:text v))) "" (tx-cat3 "`" (:text v) "` is not an environment variable name"))
+        :else (if (y-scalar? v) "" "a string value is a scalar")))
+(defn cf-enum-has? [e [:ref :kumitate/Y] s :string] :bool
+  (loop [i 0] (cond (>= i (y-n e)) false (tx-eq (:text (y-at e i)) s) true :else (recur (+ i 1)))))
+(defn cf-env-name? [s :string] :bool
+  (and (> (tx-len s) 0) (not (tx-digit? (tx-cp s 0)))
+       (loop [i 0] (cond (>= i (tx-len s)) true
+                         (let [c (tx-cp s i)] (or (tx-alpha? c) (tx-digit? c) (= c 95))) (recur (+ i 1))
+                         :else false))))
+
+;; every << NAME >> in the scalars under y: pairs scope-name checks.
+;; declared: the parameter names in scope ("" none), pipeline: pipeline parameter names
+(defn cf-refs [y [:ref :kumitate/Y] p :string declared [:list :string] scoped :bool pipeline [:list :string]] [:list [:ref :kumitate/D]]
+  (cond (y-scalar? y) (cf-refs-text (:text y) p declared scoped pipeline)
+        (or (y-map? y) (y-seq? y))
+          (loop [i 0 ds (d-list)]
+            (if (>= i (y-n y)) ds
+              (recur (+ i 1) (d-cat ds (cf-refs (y-at y i) (if (y-map? y) (cf-path p (y-key y i)) (cf-pathi p i)) declared scoped pipeline)))))
+        :else (d-list)))
+(defn cf-refs-text [t :string p :string declared [:list :string] scoped :bool pipeline [:list :string]] [:list [:ref :kumitate/D]]
+  (loop [i 0 ds (d-list)]
+    (let [a (tx-index-from t "<<" i)]
+      (if (< a 0) ds
+        (let [b (tx-index-from t ">>" (+ a 2))]
+          (if (< b 0) ds
+            (let [inner (tx-trim (tx-sub t (+ a 2) b))]
+              (recur (+ b 2)
+                (cond (tx-starts? inner "pipeline.parameters.")
+                        (if (tx-member? pipeline (tx-from inner 20)) ds
+                          (conj ds (d-err "config/pipeline-parameter-unknown" p (tx-cat3 "<< " inner " >> names no pipeline parameter"))))
+                      (and scoped (tx-starts? inner "parameters."))
+                        (if (tx-member? declared (tx-from inner 11)) ds
+                          (conj ds (d-err "config/parameter-unknown" p (tx-cat3 "<< " inner " >> names no parameter here"))))
+                      :else ds)))))))))
+(defn cf-names [m [:ref :kumitate/Y]] [:list :string] (if (y-map? m) (:keys m) (tx-strs)))
+
+;; ---------------------------------------------------------------------------
+;; Logic statements (when / unless)
+
+(defn cf-logic [y [:ref :kumitate/Y] p :string] [:list [:ref :kumitate/D]]
+  (cond (y-scalar? y) (d-list)
+        (y-null? y) (d-list)
+        (y-seq? y) (conj (d-list) (d-err "config/logic-unknown" p "a logic statement is a value or one of and, or, not, equal, matches"))
+        (not (= (y-n y) 1)) (conj (d-list) (d-err "config/logic-unknown" p "a logic statement has exactly one operator"))
+        :else
+          (let [op (y-key y 0) v (y-at y 0) q (cf-path p op)]
+            (cond (or (tx-eq op "and") (tx-eq op "or") (tx-eq op "equal"))
+                    (if (not (y-seq? v)) (conj (d-list) (d-err "config/logic-unknown" q (tx-cat op " takes a list")))
+                      (loop [i 0 ds (d-list)] (if (>= i (y-n v)) ds (recur (+ i 1) (d-cat ds (cf-logic (y-at v i) (cf-pathi q i)))))))
+                  (tx-eq op "not") (cf-logic v q)
+                  (tx-eq op "matches")
+                    (cond (not (and (y-map? v) (y-scalar? (y-get v "pattern")) (y-has? v "value")))
+                            (conj (d-list) (d-err "config/logic-unknown" q "matches takes {pattern, value}"))
+                          (not (tx-empty? (rx-check (:text (y-get v "pattern")))))
+                            (conj (d-list) (d-err "config/regex" q (tx-cat3 (rx-check (:text (y-get v "pattern"))) ": " (:text (y-get v "pattern")))))
+                          :else (d-list))
+                  :else (conj (d-list) (d-err "config/logic-unknown" q (tx-cat3 "`" op "` is not a logic operator")))))))
+
+;; ---------------------------------------------------------------------------
+;; Steps
+
+;; the names a step may call: the commands, and the orbs (which cf-check refuses
+;; once, at orbs.NAME)
+(defn cf-step-names [root [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (cf-add-names (cf-add-names (if (y-map? (y-get root "commands")) (y-get root "commands") (y-map)) (y-get root "orbs")) (y-get root "functions")))
+(defn cf-add-names [acc0 [:ref :kumitate/Y] m [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (loop [i 0 acc acc0]
+    (if (or (not (y-map? m)) (>= i (y-n m))) acc
+      (recur (+ i 1) (if (y-has? acc (y-key m i)) acc (y-put acc (y-key m i) (y-map)))))))
+(defn cf-steps [steps [:ref :kumitate/Y] p :string commands [:ref :kumitate/Y]] [:list [:ref :kumitate/D]]
+  (cond (y-null? steps) (d-list)
+        (not (y-seq? steps)) (if (tx-empty? (cf-param-ref steps "parameters"))
+                               (conj (d-list) (d-err "config/steps-not-a-list" p (tx-cat "steps is a list" (cf-line steps))))
+                               (d-list))
+        :else (loop [i 0 ds (d-list)]
+                (if (>= i (y-n steps)) ds
+                  (recur (+ i 1) (d-cat ds (cf-step (y-at steps i) (cf-pathi p i) commands)))))))
+(defn cf-step [s [:ref :kumitate/Y] p :string commands [:ref :kumitate/Y]] [:list [:ref :kumitate/D]]
+  (cond (y-scalar? s)
+          (let [t (:text s)]
+            (cond (not (tx-empty? (cf-param-ref s "parameters"))) (d-list)
+                  (tx-member? (cf-builtin-steps) t)
+                    (if (or (tx-eq t "run") (tx-eq t "when") (tx-eq t "unless") (tx-eq t "save_cache") (tx-eq t "persist_to_workspace") (tx-eq t "attach_workspace") (tx-eq t "store_artifacts") (tx-eq t "store_test_results"))
+                      (conj (d-list) (d-err "config/step-shape" p (tx-cat3 "`" t "` needs arguments")))
+                      (d-list))
+                  (y-has? commands t) (d-list)
+                  (cf-orb-ref? t) (conj (d-list) (d-err "config/orb-unresolved" p (tx-cat3 "orb command `" t "` is not fetched")))
+                  :else (conj (d-list) (d-err "config/step-unknown" p (tx-cat3 "`" t "` is no built-in step and no command")))))
+        (and (y-map? s) (= (y-n s) 1))
+          (let [name (y-key s 0) a (y-at s 0) q (cf-path p name)]
+            (cond (tx-eq name "run")
+                    (cond (y-scalar? a) (d-list)
+                          (and (y-map? a) (y-has? a "command")) (d-list)
+                          :else (conj (d-list) (d-err "config/run-command-missing" q "run needs a command")))
+                  (or (tx-eq name "when") (tx-eq name "unless"))
+                    (if (and (y-map? a) (y-has? a "condition") (y-has? a "steps"))
+                      (d-cat (cf-logic (y-get a "condition") (cf-path q "condition")) (cf-steps (y-get a "steps") (cf-path q "steps") commands))
+                      (conj (d-list) (d-err "config/step-shape" q (tx-cat name " takes condition and steps"))))
+                  ;; - steps: << parameters.x >> splices a steps parameter
+                  (tx-eq name "steps") (if (y-seq? a) (cf-steps a q commands) (d-list))
+                  (tx-eq name "deploy") (conj (cf-step (->Y 3 "" (conj (tx-strs) "run") (conj (y-list) a) 0) p commands)
+                                              (d-warn "config/deprecated-step" q "deploy is deprecated; read as run"))
+                  (tx-member? (cf-builtin-steps) name) (d-list)
+                  (y-has? commands name) (d-list)
+                  (cf-orb-ref? name) (conj (d-list) (d-err "config/orb-unresolved" q (tx-cat3 "orb command `" name "` is not fetched")))
+                  :else (conj (d-list) (d-err "config/step-unknown" q (tx-cat3 "`" name "` is no built-in step and no command")))))
+        :else (conj (d-list) (d-err "config/step-shape" p (tx-cat "a step is a name or a one-key mapping" (cf-line s))))))
+
+;; ---------------------------------------------------------------------------
+;; Executors and jobs
+
+(defn cf-executor-body [e [:ref :kumitate/Y] p :string] [:list [:ref :kumitate/D]]
+  (let [kinds (+ (if (y-has? e "docker") 1 0) (+ (if (y-has? e "machine") 1 0) (if (y-has? e "macos") 1 0)))
+        docker (y-get e "docker")]
+    (cond (not (= kinds 1)) (conj (d-list) (d-err "config/executor-type" p "an executor has exactly one of docker, machine, macos"))
+          (and (y-has? e "docker") (not (y-seq? docker))) (conj (d-list) (d-err "config/executor-type" (cf-path p "docker") "docker is a list of images"))
+          (y-has? e "docker")
+            (loop [i 0 ds (d-list)]
+              (if (>= i (y-n docker)) ds
+                (recur (+ i 1) (if (y-has? (y-at docker i) "image") ds
+                                 (conj ds (d-err "config/docker-image-missing" (cf-pathi (cf-path p "docker") i) "each docker entry names an image"))))))
+          :else (d-list))))
+(defn cf-executors [ex [:ref :kumitate/Y] pipeline [:list :string]] [:list [:ref :kumitate/D]]
+  (cond (y-null? ex) (d-list)
+        (not (y-map? ex)) (conj (d-list) (d-err "config/not-a-mapping-at" "executors" "executors is a mapping"))
+        :else (loop [i 0 ds (d-list)]
+                (if (>= i (y-n ex)) ds
+                  (let [e (y-at ex i) p (cf-path "executors" (y-key ex i))]
+                    (recur (+ i 1)
+                      (if (not (y-map? e)) (conj ds (d-err "config/not-a-mapping-at" p "an executor is a mapping"))
+                        (-> ds (d-cat (cf-params (y-get e "parameters") (cf-path p "parameters") false))
+                               (d-cat (cf-executor-body e p))
+                               (d-cat (cf-refs (y-del e "parameters") p (cf-names (y-get e "parameters")) true pipeline))))))))))
+
+(defn cf-job [j [:ref :kumitate/Y] p :string root [:ref :kumitate/Y] pipeline [:list :string]] [:list [:ref :kumitate/D]]
+  (if (not (y-map? j)) (conj (d-list) (d-err "config/not-a-mapping-at" p (tx-cat "a job is a mapping" (cf-line j))))
+    (let [t (if (y-has? j "type") (:text (y-get j "type")) "build")
+          kinds (+ (if (y-has? j "docker") 1 0) (+ (if (y-has? j "machine") 1 0) (+ (if (y-has? j "macos") 1 0) (if (y-has? j "executor") 1 0))))
+          ex (y-get j "executor")
+          exname (cond (y-scalar? ex) (:text ex) (y-map? ex) (:text (y-get ex "name")) :else "")
+          declared (cf-names (y-get j "parameters"))
+          unknown (loop [i 0 ds (d-list)]
+                    (if (>= i (y-n j)) ds
+                      (recur (+ i 1) (if (tx-member? (cf-job-keys) (y-key j i)) ds
+                                       (conj ds (d-warn "config/unknown-key" (cf-path p (y-key j i)) "not a job key; ignored"))))))
+          par (y-get j "parallelism")
+          base (-> unknown
+                   (d-cat (cf-params (y-get j "parameters") (cf-path p "parameters") false))
+                   (d-cat (cf-refs (y-del j "parameters") p declared true pipeline)))]
+      (cond (not (or (tx-eq t "build") (tx-eq t "release") (tx-eq t "no-op") (tx-eq t "approval")))
+              (conj base (d-err "config/job-type" (cf-path p "type") (tx-cat3 "`" t "` is not build, release, no-op or approval")))
+            (or (tx-eq t "no-op") (tx-eq t "approval")) base
+            (= kinds 0) (conj base (d-err "config/job-executor-missing" p "a job names one of docker, machine, macos, executor"))
+            (> kinds 1) (conj base (d-err "config/job-executor-multiple" p "a job names exactly one of docker, machine, macos, executor"))
+            :else
+              (-> base
+                  (d-cat (if (y-has? j "executor")
+                           (cond (not (tx-empty? (cf-param-ref ex "parameters"))) (d-list)
+                                 (tx-has? exname "<<") (d-list)
+                                 (cf-orb-ref? exname) (conj (d-list) (d-err "config/orb-unresolved" (cf-path p "executor") (tx-cat3 "orb executor `" exname "` is not fetched")))
+                                 (y-has? (y-get root "executors") exname) (d-list)
+                                 :else (conj (d-list) (d-err "config/executor-unknown" (cf-path p "executor") (tx-cat3 "no executor `" exname "`"))))
+                           (cf-executor-body j p)))
+                  (d-cat (cond (not (y-has? j "steps")) (conj (d-list) (d-err "config/job-steps-missing" p "a job has steps"))
+                               :else (cf-steps (y-get j "steps") (cf-path p "steps") (cf-step-names root))))
+                  (d-cat (if (or (y-null? par) (and (y-intv? par) (>= (tx-int (:text par)) 1)) (and (y-scalar? par) (tx-has? (:text par) "<<")))
+                           (d-list) (conj (d-list) (d-err "config/parallelism" (cf-path p "parallelism") "parallelism is an integer >= 1")))))))))
+
+(defn cf-commands [cs [:ref :kumitate/Y] pipeline [:list :string] names [:ref :kumitate/Y]] [:list [:ref :kumitate/D]]
+  (cond (y-null? cs) (d-list)
+        (not (y-map? cs)) (conj (d-list) (d-err "config/not-a-mapping-at" "commands" "commands is a mapping"))
+        :else (loop [i 0 ds (d-list)]
+                (if (>= i (y-n cs)) ds
+                  (let [c (y-at cs i) p (cf-path "commands" (y-key cs i))]
+                    (recur (+ i 1)
+                      (cond (not (y-map? c)) (conj ds (d-err "config/not-a-mapping-at" p "a command is a mapping"))
+                            (not (y-has? c "steps")) (conj ds (d-err "config/job-steps-missing" p "a command has steps"))
+                            :else (-> ds (d-cat (cf-params (y-get c "parameters") (cf-path p "parameters") false))
+                                         (d-cat (cf-steps (y-get c "steps") (cf-path p "steps") names))
+                                         (d-cat (cf-refs (y-del c "parameters") p (cf-names (y-get c "parameters")) true pipeline))))))))))
+
+;; ---------------------------------------------------------------------------
+;; Workflows
+
+(defn cf-filter-list [v [:ref :kumitate/Y] p :string] [:list [:ref :kumitate/D]]
+  (let [items (cond (y-scalar? v) (conj (y-list) v) (y-seq? v) (:kids v) :else (y-list))]
+    (if (and (not (y-scalar? v)) (not (y-seq? v))) (conj (d-list) (d-err "config/filter-shape" p "a filter is a string or a list"))
+      (loop [i 0 ds (d-list)]
+        (if (>= i (count items)) ds
+          (let [t (:text (nth items i))]
+            (recur (+ i 1)
+              (if (and (tx-starts? t "/") (tx-ends? t "/") (>= (tx-len t) 2) (not (tx-empty? (rx-check (tx-sub t 1 (- (tx-len t) 1))))))
+                (conj ds (d-err "config/regex" p (tx-cat3 (rx-check (tx-sub t 1 (- (tx-len t) 1))) ": " t)))
+                ds))))))))
+(defn cf-filters [f [:ref :kumitate/Y] p :string] [:list [:ref :kumitate/D]]
+  (cond (y-scalar? f)
+          ;; an expression-based filter: its syntax, with every value unknown
+          (let [r (ex-eval (:text f) (ev-new))]
+            (if (ex-ok? r) (d-list) (conj (d-list) (d-err "config/filter-expression" p (tx-cat3 (:err r) ": " (:text f))))))
+        (not (y-map? f)) (conj (d-list) (d-err "config/filter-shape" p "filters is an expression or a mapping of branches and tags"))
+        :else
+    (loop [i 0 ds (d-list)]
+      (if (>= i (y-n f)) ds
+        (let [k (y-key f i) v (y-at f i) q (cf-path p k)]
+          (recur (+ i 1)
+            (cond (not (or (tx-eq k "branches") (tx-eq k "tags"))) (conj ds (d-err "config/filter-shape" q "filters take branches and tags"))
+                  (not (y-map? v)) (conj ds (d-err "config/filter-shape" q "only and ignore"))
+                  :else (loop [m 0 d2 ds]
+                          (if (>= m (y-n v)) d2
+                            (recur (+ m 1)
+                              (if (or (tx-eq (y-key v m) "only") (tx-eq (y-key v m) "ignore"))
+                                (d-cat d2 (cf-filter-list (y-at v m) (cf-path q (y-key v m))))
+                                (conj d2 (d-err "config/filter-shape" (cf-path q (y-key v m)) "only and ignore")))))))))))))
+(defn cf-requires [r [:ref :kumitate/Y] p :string] [:list [:ref :kumitate/D]]
+  (if (not (y-seq? r)) (conj (d-list) (d-err "config/requires-shape" p "requires is a list"))
+    (loop [i 0 ds (d-list)]
+      (if (>= i (y-n r)) ds
+        (let [e (y-at r i) q (cf-pathi p i)]
+          (recur (+ i 1)
+            (cond (y-scalar? e) ds
+                  (and (y-map? e) (= (y-n e) 1))
+                    (let [st (y-at e 0) sts (cond (y-scalar? st) (conj (y-list) st) (y-seq? st) (:kids st) :else (y-list))]
+                      (loop [k 0 d2 ds]
+                        (cond (>= k (count sts)) (if (= (count sts) 0) (conj d2 (d-err "config/requires-status" q "a status or a list of them")) d2)
+                              (tx-member? (cf-statuses) (:text (nth sts k))) (recur (+ k 1) d2)
+                              :else (recur (+ k 1) (conj d2 (d-err "config/requires-status" q (tx-cat3 "`" (:text (nth sts k)) "` is not success, failed, canceled or not_run")))))))
+                  :else (conj ds (d-err "config/requires-shape" q "a job name, or {name: status}")))))))))
+(defn cf-matrix [m [:ref :kumitate/Y] p :string job [:ref :kumitate/Y]] [:list [:ref :kumitate/D]]
+  (let [ps (y-get m "parameters") declared (cf-names (y-get job "parameters"))]
+    (cond (not (y-map? m)) (conj (d-list) (d-err "config/matrix-shape" p "matrix is a mapping with parameters"))
+          (not (y-map? ps)) (conj (d-list) (d-err "config/matrix-shape" (cf-path p "parameters") "matrix parameters is a mapping of lists"))
+          :else
+            (loop [i 0 ds (if (or (y-null? (y-get m "exclude")) (y-seq? (y-get m "exclude"))) (d-list)
+                            (conj (d-list) (d-err "config/matrix-shape" (cf-path p "exclude") "exclude is a list of parameter maps")))]
+              (if (>= i (y-n ps)) ds
+                (let [k (y-key ps i) q (cf-path (cf-path p "parameters") k)]
+                  (recur (+ i 1)
+                    (cond (not (y-seq? (y-at ps i))) (conj ds (d-err "config/matrix-shape" q "a matrix parameter is a list of values"))
+                          (and (y-map? job) (not (tx-member? declared k))) (conj ds (d-err "config/matrix-parameter-unknown" q (tx-cat3 "the job declares no parameter `" k "`")))
+                          :else ds))))))))
+(defn cf-wf-job [e [:ref :kumitate/Y] p :string root [:ref :kumitate/Y] pipeline [:list :string]] [:list [:ref :kumitate/D]]
+  (let [name (cond (y-scalar? e) (:text e) (and (y-map? e) (= (y-n e) 1)) (y-key e 0) :else "")
+        a (if (y-map? e) (y-at e 0) (y-null))
+        approval (and (y-map? a) (tx-eq (:text (y-get a "type")) "approval"))
+        jobs (y-get root "jobs")
+        job (y-get jobs name)
+        q (cf-path p name)]
+    (cond (tx-empty? name) (conj (d-list) (d-err "config/workflow-job-shape" p (tx-cat "a workflow job is a name or a one-key mapping" (cf-line e))))
+          (and (not (y-null? a)) (not (y-map? a))) (conj (d-list) (d-err "config/workflow-job-shape" q "the job's settings are a mapping"))
+          (and (not approval) (cf-orb-ref? name)) (conj (d-list) (d-err "config/orb-unresolved" q (tx-cat3 "orb job `" name "` is not fetched")))
+          (and (not approval) (not (y-has? jobs name))) (conj (d-list) (d-err "config/job-unknown" q (tx-cat3 "no job `" name "`")))
+          :else
+            (let [declared (cf-names (y-get job "parameters"))]
+              (loop [i 0 ds (d-list)]
+                (if (>= i (y-n a)) ds
+                  (let [k (y-key a i) v (y-at a i) qk (cf-path q k)]
+                    (recur (+ i 1)
+                      (cond (tx-eq k "requires") (d-cat ds (cf-requires v qk))
+                            (tx-eq k "filters") (d-cat ds (cf-filters v qk))
+                            (tx-eq k "matrix") (d-cat ds (cf-matrix v qk job))
+                            (or (tx-eq k "pre-steps") (tx-eq k "post-steps")) (d-cat ds (cf-steps v qk (cf-step-names root)))
+                            (tx-eq k "type") (if (or (tx-eq (:text v) "approval") (tx-eq (:text v) "no-op")) ds
+                                               (conj ds (d-err "config/job-type" qk "a workflow job's type is approval or no-op")))
+                            (tx-member? (cf-wf-job-keys) k) ds
+                            (tx-member? declared k) (d-cat ds (cf-refs v qk (tx-strs) false pipeline))
+                            approval ds
+                            :else (conj ds (d-err "config/workflow-job-key" qk (tx-cat3 "`" k "` is neither a workflow job key nor a parameter of the job"))))))))))))
+(defn cf-workflows [wfs [:ref :kumitate/Y] root [:ref :kumitate/Y] pipeline [:list :string]] [:list [:ref :kumitate/D]]
+  (cond (y-null? wfs) (conj (d-list) (d-err "config/workflows-missing" "workflows" "a 2.1 config names its workflows"))
+        (not (y-map? wfs)) (conj (d-list) (d-err "config/not-a-mapping-at" "workflows" "workflows is a mapping"))
+        :else
+          (loop [i 0 ds (d-list)]
+            (if (>= i (y-n wfs)) ds
+              (let [name (y-key wfs i) w (y-at wfs i) p (cf-path "workflows" name)]
+                (recur (+ i 1)
+                  (cond (tx-eq name "version") (conj ds (d-warn "config/workflows-version-ignored" p "workflows version is a 2.0 key; ignored"))
+                        (not (y-map? w)) (conj ds (d-err "config/not-a-mapping-at" p "a workflow is a mapping"))
+                        (not (y-seq? (y-get w "jobs"))) (conj ds (d-err "config/workflow-jobs-missing" p "a workflow lists its jobs"))
+                        :else
+                          (-> ds
+                              (d-cat (if (y-has? w "triggers") (conj (d-list) (d-warn "config/scheduled-trigger" (cf-path p "triggers") "scheduled triggers are not evaluated")) (d-list)))
+                              (d-cat (cf-logic (y-get w "when") (cf-path p "when")))
+                              (d-cat (cf-logic (y-get w "unless") (cf-path p "unless")))
+                              (d-cat (cf-refs (y-get w "when") (cf-path p "when") (tx-strs) false pipeline))
+                              (d-cat (cf-refs (y-get w "unless") (cf-path p "unless") (tx-strs) false pipeline))
+                              (d-cat (loop [k 0 d2 (d-list)]
+                                       (if (>= k (y-n (y-get w "jobs"))) d2
+                                         (recur (+ k 1) (d-cat d2 (cf-wf-job (y-at (y-get w "jobs") k) (cf-pathi (cf-path p "jobs") k) root pipeline))))))))))))))
+
+;; ---------------------------------------------------------------------------
+;; The config
+
+(defn cf-check [root [:ref :kumitate/Y]] [:list [:ref :kumitate/D]]
+  (if (not (y-map? root)) (conj (d-list) (d-err "config/not-a-mapping" "" "a config is a mapping"))
+    (let [v (y-get root "version")
+          orbs (y-get root "orbs")
+          pipeline (cf-names (y-get root "parameters"))
+          top (loop [i 0 ds (d-list)]
+                (if (>= i (y-n root)) ds
+                  (let [k (y-key root i)]
+                    (recur (+ i 1)
+                      (cond (tx-member? (cf-top-keys) k) ds
+                            (tx-eq k "job-groups") (conj ds (d-err "config/job-groups-unsupported" k "job-groups are not read by kumitate"))
+                            (tx-eq k "functions")
+                              (let [fs (y-at root i)]
+                                (loop [q 0 d2 ds]
+                                  (if (or (not (y-map? fs)) (>= q (y-n fs))) (if (y-map? fs) d2 (conj d2 (d-err "config/not-a-mapping-at" k "functions is a mapping")))
+                                    (recur (+ q 1) (conj d2 (d-err "config/function-unresolved" (cf-path k (y-key fs q))
+                                                                   (tx-cat3 "function " (:text (y-at fs q)) " is external code; kumitate does not fetch it")))))))
+                            :else (conj ds (d-warn "config/unknown-key" k "not a top-level key; ignored (anchors may live here)")))))))
+          orbd (cond (y-null? orbs) (d-list)
+                     (not (y-map? orbs)) (conj (d-list) (d-err "config/not-a-mapping-at" "orbs" "orbs is a mapping"))
+                     :else (loop [i 0 ds (d-list)]
+                             (if (>= i (y-n orbs)) ds
+                               (recur (+ i 1)
+                                 (conj ds (if (y-map? (y-at orbs i))
+                                            (d-err "config/orb-inline-unsupported" (cf-path "orbs" (y-key orbs i)) "inline orbs are not expanded")
+                                            (d-err "config/orb-unresolved" (cf-path "orbs" (y-key orbs i))
+                                                   (tx-cat3 "orb " (:text (y-at orbs i)) " is not fetched; kumitate reads only the config you pass"))))))))]
+      (cond (y-null? v) (conj top (d-err "config/version-missing" "version" "kumitate reads version 2.1 configs"))
+            (not (tx-eq (:text v) "2.1")) (conj top (d-err "config/version-unsupported" "version" (tx-cat3 "version " (:text v) "; kumitate reads 2.1")))
+            :else
+              (-> top
+                  (d-cat orbd)
+                  (d-cat (if (y-true? (y-get root "setup")) (conj (d-list) (d-warn "config/setup-workflow" "setup" "a setup config continues into another; the continuation is not read")) (d-list)))
+                  (d-cat (cf-params (y-get root "parameters") "parameters" true))
+                  (d-cat (cf-executors (y-get root "executors") pipeline))
+                  (d-cat (cf-commands (y-get root "commands") pipeline (cf-step-names root)))
+                  (d-cat (let [jobs (y-get root "jobs")]
+                           (cond (y-null? jobs) (conj (d-list) (d-err "config/jobs-missing" "jobs" "a config defines jobs"))
+                                 (not (y-map? jobs)) (conj (d-list) (d-err "config/not-a-mapping-at" "jobs" "jobs is a mapping"))
+                                 :else (loop [i 0 ds (d-list)]
+                                         (if (>= i (y-n jobs)) ds
+                                           (recur (+ i 1) (d-cat ds (cf-job (y-at jobs i) (cf-path "jobs" (y-key jobs i)) root pipeline))))))))
+                  (d-cat (cf-workflows (y-get root "workflows") root pipeline)))))))

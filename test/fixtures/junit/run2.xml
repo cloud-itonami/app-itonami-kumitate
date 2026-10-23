@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="api" tests="3" failures="0" errors="1" time="2.4">
+  <testcase classname="tests.test_api" name="test_list" time="0.110"/>
+  <testcase classname="tests.test_api" name="test_create" time="1.2"/>
+  <testcase classname="tests.test_auth" name="test_login &amp; logout" time="1.1"><error message="TimeoutError"><![CDATA[timed out after 1s]]></error></testcase>
+</testsuite>

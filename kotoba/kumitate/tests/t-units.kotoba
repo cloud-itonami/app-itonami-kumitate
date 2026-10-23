@@ -1,0 +1,193 @@
+;; tests/t-units (prefix t-): unit tests of the pure modules. Each test-* is
+;; zero-arity and true when every assertion holds; tests/t-gate prints them
+;; one by one and returns how many passed (kotoba/kumitate/GATE-MANIFEST).
+;; Refusals are pinned by their reason literal, not by "failed".
+
+(defn t-yaml [s :string] [:ref :kumitate/Y] (:node (ym-parse s)))
+(defn t-yaml-err [s :string] :string (:err (:st (ym-parse s))))
+(defn t-json [s :string] :string (js-write (t-yaml s)))
+
+(defn test-yaml-scalars [] :bool
+  (and (tx-eq (t-json "a: 1\nb: true\nc: ~\nd: \"x\\ty\"\ne: 'it''s'\nf: plain text here\n")
+              "{\"a\":1,\"b\":true,\"c\":null,\"d\":\"x\\ty\",\"e\":\"it's\",\"f\":\"plain text here\"}")
+       (tx-eq (t-json "u: \"\\u65e5\\x41\"\n") (tx-cat3 "{\"u\":\"" (tx-utf8 26085) "A\"}"))
+       (tx-eq (t-json "k: a\n  b\n\n  c\n") "{\"k\":\"a b\\nc\"}")
+       (tx-eq (t-json "url: http://x:8080/a#b\nc: echo \"a # b\"\n") "{\"url\":\"http://x:8080/a#b\",\"c\":\"echo \\\"a\"}")))
+(defn test-yaml-blocks [] :bool
+  (and (tx-eq (t-json "a: |\n  one\n   two\n\n  three\nb: x\n") "{\"a\":\"one\\n two\\n\\nthree\\n\",\"b\":\"x\"}")
+       (tx-eq (t-json "a: |-\n  one\n  two\n") "{\"a\":\"one\\ntwo\"}")
+       (tx-eq (t-json "a: |+\n  one\n\n\nb: 1\n") "{\"a\":\"one\\n\\n\\n\",\"b\":1}")
+       (tx-eq (t-json "a: >\n  one\n  two\n\n  three\n") "{\"a\":\"one two\\nthree\\n\"}")
+       (tx-eq (t-json "a: >-\n  # not a comment\n  x\n") "{\"a\":\"# not a comment x\"}")
+       (tx-eq (t-json "- |2\n    two spaces\n") "[\"  two spaces\\n\"]")))
+(defn test-yaml-collections [] :bool
+  (and (tx-eq (t-json "a:\n- 1\n- 2\nb: [x, 'y z', {k: v}]\n") "{\"a\":[1,2],\"b\":[\"x\",\"y z\",{\"k\":\"v\"}]}")
+       (tx-eq (t-json "- name: a\n  run: b\n- - c\n  - d\n") "[{\"name\":\"a\",\"run\":\"b\"},[\"c\",\"d\"]]")
+       (tx-eq (t-json "a: {b: [1,\n  2], c: d}\n") "{\"a\":{\"b\":[1,2],\"c\":\"d\"}}")
+       (tx-eq (t-json "---\n# c\nx: []\ny: {}\n...\n") "{\"x\":[],\"y\":{}}")))
+(defn test-yaml-anchors [] :bool
+  (and (tx-eq (t-json "d: &d {a: 1, b: 2}\ne:\n  <<: *d\n  b: 3\nf: *d\n") "{\"d\":{\"a\":1,\"b\":2},\"e\":{\"b\":3,\"a\":1},\"f\":{\"a\":1,\"b\":2}}")
+       (tx-eq (t-json "a: &x\n  k: v\nb:\n  <<: [*x, {z: 1}]\n") "{\"a\":{\"k\":\"v\"},\"b\":{\"k\":\"v\",\"z\":1}}")
+       (tx-eq (t-json "- &s hello\n- *s\n") "[\"hello\",\"hello\"]")))
+(defn test-yaml-refusals [] :bool
+  (and (tx-eq (t-yaml-err "a:\n\tb: 1\n") "yaml/tab-indent")
+       (tx-eq (t-yaml-err "a: 1\na: 2\n") "yaml/duplicate-key")
+       (tx-eq (t-yaml-err "a: *nope\n") "yaml/unknown-alias")
+       (tx-eq (t-yaml-err "a: !!str 1\n") "yaml/tag-unsupported")
+       (tx-eq (t-yaml-err "a: 1\n---\nb: 2\n") "yaml/multi-document")
+       (tx-eq (t-yaml-err "a: \"open\n") "yaml/unterminated-quote")
+       (tx-eq (t-yaml-err "a: [1, 2\n") "yaml/unterminated-flow")
+       (tx-eq (t-yaml-err "a: \"\\q\"\n") "yaml/bad-escape")
+       (tx-eq (t-yaml-err "a: 1\n b: 2\n") "yaml/bad-indent")
+       (tx-eq (t-yaml-err "a: <<: *x\nb:\n  <<: 3\n") "yaml/bad-merge")
+       (tx-eq (t-yaml-err "? complex\n: v\n") "yaml/complex-key-unsupported")
+       (tx-eq (t-yaml-err "# only a comment\n") "yaml/empty")
+       (tx-eq (t-yaml-err "a: 1\n") "")))
+(defn test-emit-roundtrip [] :bool
+  (let [src "version: 2.1\na: \"true\"\nb: true\nc: \"12\"\nd: 12\ne: |\n  x\n  y\nf: \"\"\ng: [1, {h: \"a: b\"}]\ni: null\nj: \"- dash\"\nk: '#x'\n"
+        y (t-yaml src) back (t-yaml (ye-emit y))]
+    (and (y-equal? y back)
+         (= (:kind (y-get back "a")) 2) (= (:kind (y-get back "b")) 1)
+         (= (:kind (y-get back "c")) 2) (tx-eq (:text (y-get back "e")) "x\ny\n")
+         (tx-eq (ye-emit (t-yaml "a: [x]\nb: {}\n")) "a:\n  - x\nb: {}\n"))))
+(defn test-json [] :bool
+  (and (tx-eq (js-write (:node (js-parse " {\"a\": [1, -2.5e3, true, null, \"\\ud83d\\ude00\\n\"]} "))) (tx-cat3 "{\"a\":[1,-2.5e3,true,null,\"" (tx-utf8 128512) "\\n\"]}"))
+       (tx-eq (:err (js-parse "{\"a\":1,}")) "json/unexpected")
+       (tx-eq (:err (js-parse "[1] 2")) "json/trailing-content")
+       (tx-eq (:err (js-parse "{\"a\":1,\"a\":2}")) "json/duplicate-key")
+       (tx-eq (:err (js-parse "\"\\ud800\"")) "json/bad-escape")
+       (tx-eq (:err (js-parse "01")) "json/bad-number")
+       (js-number? "0") (js-number? "-1.5E+3") (not (js-number? "1.")) (not (js-number? "+1"))))
+(defn test-regex [] :bool
+  (and (rx-matches? "main" "main") (not (rx-matches? "main" "main2"))
+       (rx-matches? "release/.+" "release/1.0") (not (rx-matches? "release/.+" "release/"))
+       (rx-matches? "^v[0-9]+\\.[0-9]+\\.[0-9]+$" "v10.2.3") (not (rx-matches? "v[0-9]+" "v1.2"))
+       (rx-matches? "(feat|fix)(\\(\\w+\\))?:.*" "fix(core): x") (rx-matches? "[^/]*" "abc") (not (rx-matches? "[^/]*" "a/c"))
+       (rx-matches? "a{2}b{1,}c{0,1}" "aabbb") (not (rx-matches? "a{2}" "aaa")) (rx-matches? "x*" "")
+       (rx-matches? "\\d\\s\\w" "1 _") (rx-matches? "[a\\-z]+" "a-z")
+       (tx-eq (rx-check "(?=x)") "regex/unsupported") (tx-eq (rx-check "\\1") "regex/unsupported")
+       (tx-eq (rx-check "(a") "regex/unbalanced") (tx-eq (rx-check "a)") "regex/unbalanced")
+       (tx-eq (rx-check "[b-a]") "regex/bad-class") (tx-eq (rx-check "*a") "regex/bad-repeat")
+       (tx-eq (rx-check "a{101}") "regex/too-large") (tx-eq (rx-check "a|b") "")))
+(defn t-env [] [:ref :kumitate/EV]
+  (-> (ev-new) (ev-put "pipeline.git.branch" (y-str "main")) (ev-put "pipeline.git.tag" (y-null))
+      (ev-put "pipeline.parameters.n" (y-plain "3")) (ev-put "pipeline.parameters.on" (y-plain "true"))))
+(defn t-ex [s :string] :string
+  (let [r (ex-eval s (t-env))]
+    (cond (not (ex-ok? r)) (:err r) (ex-unknown? (:v r)) "?" (y-null? (:v r)) "null" :else (:text (:v r)))))
+(defn test-expr [] :bool
+  (and (tx-eq (t-ex "pipeline.git.branch == \"main\"") "true")
+       (tx-eq (t-ex "pipeline.git.branch == \"main\" and 10 or 1") "10")
+       (tx-eq (t-ex "pipeline.git.branch != \"main\" and 10 or 1") "1")
+       (tx-eq (t-ex "pipeline.git.tag or \"no tag\"") "no tag")
+       (tx-eq (t-ex "pipeline.git.tag starts-with \"v\"") "false")
+       (tx-eq (t-ex "pipeline.git.branch matches /ma.n/") "true")
+       (tx-eq (t-ex "not pipeline.parameters.on and true") "false")
+       (tx-eq (t-ex "not (pipeline.parameters.on and false)") "true")
+       (tx-eq (t-ex "pipeline.parameters.n >= 3") "true")
+       (tx-eq (t-ex "pipeline.parameters.n == \"3\"") "false")
+       (tx-eq (t-ex "pipeline.number == 7") "?")
+       (tx-eq (t-ex "pipeline.number == 7 or true") "true")
+       (tx-eq (t-ex "pipeline.number == 7 and false") "false")
+       (tx-eq (t-ex "true or (\"a\" > 1)") "true")
+       (tx-eq (t-ex "\"a\" > 1") "expr/type")
+       (tx-eq (t-ex "branch == \"main\"") "expr/unknown-name")
+       (tx-eq (t-ex "pipeline.git.branch ==") "expr/syntax")
+       (tx-eq (t-ex "(true") "expr/syntax")
+       (tx-eq (t-ex "pipeline.git.branch matches /(?=x)/") "regex/unsupported")))
+(defn test-iso-uuid [] :bool
+  (and (= (ap-iso-ms "1970-01-01T00:00:00Z") 0)
+       (= (ap-iso-ms "2026-10-23T07:01:25.841Z") 1792738885841)
+       (= (ap-iso-ms "2026-10-23T16:01:25.841+09:00") 1792738885841)
+       (= (ap-iso-ms "2026-13-01T00:00:00Z") -1) (= (ap-iso-ms "yesterday") -1)
+       (tx-eq (ap-ms-iso 1792738885841) "2026-10-23T07:01:25.841Z")
+       (tx-eq (ap-ms-iso 951782400000) "2000-02-29T00:00:00.000Z")
+       (tx-eq (ap-uuid "x") (ap-uuid "x")) (not (tx-eq (ap-uuid "x") (ap-uuid "y")))
+       (= (tx-len (ap-uuid "x")) 36) (tx-eq (tx-sub (ap-uuid "x") 14 15) "4")))
+(defn test-xml [] :bool
+  (let [r (xm-parse "<?xml version=\"1.0\"?><!-- c --><a x='1' y=\"&lt;&amp;&#65;&#x42;\"><b/><![CDATA[<raw>]]> t </a>")]
+    (and (tx-empty? (:err r)) (tx-eq (:text (:node r)) "a")
+         (tx-eq (xm-attr (:node r) "y") "<&AB") (tx-eq (xm-attr (:node r) "#text") "<raw> t")
+         (= (count (xm-children (:node r) "b")) 1)
+         (tx-eq (:err (xm-parse "<!DOCTYPE x [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><x>&e;</x>")) "xml/doctype-unsupported")
+         (tx-eq (:err (xm-parse "<a><b></a>")) "xml/mismatched-tag")
+         (tx-eq (:err (xm-parse "<a>&nope;</a>")) "xml/bad-entity")
+         (tx-eq (:err (xm-parse "<a></a><b/>")) "xml/trailing-content"))))
+(defn t-plan [src :string inputs [:ref :kumitate/Y]] [:ref :kumitate/PR] (pl-plan (t-yaml src) inputs))
+(defn t-job [pr [:ref :kumitate/PR] w :i64 j :i64] [:ref :kumitate/JI] (nth (:jobs (nth (:workflows pr) w)) j))
+(defn test-plan-matrix [] :bool
+  (let [pr (t-plan "version: 2.1\njobs:\n  t:\n    parameters: {b: {type: string}, a: {type: string}}\n    docker: [{image: x}]\n    steps: [{run: echo << parameters.a >><< parameters.b >>}]\n  r: {docker: [{image: x}], steps: [checkout]}\nworkflows:\n  w:\n    jobs:\n      - t: {matrix: {parameters: {b: [\"1\", \"2\"], a: [x, y]}, exclude: [{a: y, b: \"1\"}]}}\n      - r: {requires: [t]}\n" (y-map))]
+    (and (pl-ok? pr) (= (count (:jobs (nth (:workflows pr) 0))) 4)
+         (tx-eq (:name (t-job pr 0 0)) "t-x-1") (tx-eq (:name (t-job pr 0 1)) "t-x-2") (tx-eq (:name (t-job pr 0 2)) "t-y-2")
+         (= (vector-count (:deps (t-job pr 0 3))) 3) (= (:level (t-job pr 0 3)) 1)
+         (tx-eq (:text (y-get (y-at (y-get (:body (t-job pr 0 2)) "steps") 0) "run")) "echo y2"))))
+(defn test-plan-refusals [] :bool
+  (let [base "version: 2.1\njobs:\n  a: {docker: [{image: x}], steps: [checkout]}\n  b: {docker: [{image: x}], steps: [checkout]}\nworkflows:\n  w:\n    jobs:\n"]
+    (and (d-has? (:diags (t-plan (tx-cat base "      - a: {requires: [b]}\n      - b: {requires: [a]}\n") (y-map))) "plan/requires-cycle")
+         (d-has? (:diags (t-plan (tx-cat base "      - a: {requires: [c]}\n") (y-map))) "plan/requires-unknown")
+         (d-has? (:diags (t-plan (tx-cat base "      - a\n      - a\n") (y-map))) "plan/job-name-duplicate")
+         (d-has? (:diags (t-plan (tx-cat base "      - a: {matrix: {parameters: {z: [1]}}}\n") (y-map))) "config/matrix-parameter-unknown")
+         (d-has? (:diags (t-plan "version: 2.1\nparameters: {p: {type: boolean}}\njobs:\n  a: {docker: [{image: x}], steps: [checkout]}\nworkflows: {w: {jobs: [a]}}\n" (y-map))) "plan/parameter-missing")
+         (d-has? (:diags (t-plan "version: 2.1\nparameters: {p: {type: boolean, default: false}}\njobs:\n  a: {docker: [{image: x}], steps: [checkout]}\nworkflows: {w: {jobs: [a]}}\n"
+                                 (y-put (y-map) "parameters" (y-put (y-map) "p" (y-str "yes"))))) "plan/parameter-type")
+         (d-has? (:diags (t-plan "version: 2.1\norbs: {node: circleci/node@5}\njobs:\n  a: {docker: [{image: x}], steps: [node/install]}\nworkflows: {w: {jobs: [a]}}\n" (y-map))) "config/orb-unresolved")
+         (d-has? (:diags (t-plan "version: 2.1\norbs: {node: circleci/node@5}\njobs:\n  a: {docker: [{image: x}], steps: [node/install]}\nworkflows: {w: {jobs: [a]}}\n" (y-map))) "plan/config-refused"))))
+(defn test-plan-filters [] :bool
+  (let [src "version: 2.1\njobs:\n  a: {docker: [{image: x}], steps: [checkout]}\n  b: {docker: [{image: x}], steps: [checkout]}\n  c: {docker: [{image: x}], steps: [checkout]}\nworkflows:\n  w:\n    jobs:\n      - a: {filters: {branches: {only: [main, /rel-.*/]}, tags: {only: /^v.*/}}}\n      - b: {requires: [a]}\n      - c: {filters: 'pipeline.git.branch starts-with \"rel-\"'}\n"
+        main (t-plan src (y-put (y-map) "branch" (y-str "main")))
+        rel (t-plan src (y-put (y-map) "branch" (y-str "rel-2")))
+        dev (t-plan src (y-put (y-map) "branch" (y-str "dev")))
+        tag (t-plan src (y-put (y-map) "tag" (y-str "v1")))]
+    (and (:run (t-job main 0 0)) (:run (t-job main 0 1)) (not (:run (t-job main 0 2))) (tx-eq (:reason (t-job main 0 2)) "filters/expression-false")
+         (:run (t-job rel 0 2))
+         (tx-eq (:reason (t-job dev 0 0)) "filters/branch-not-selected") (tx-eq (:reason (t-job dev 0 1)) "plan/upstream-not-run")
+         (:run (t-job tag 0 0)) (tx-eq (:reason (t-job tag 0 1)) "filters/tag-not-selected"))))
+(defn test-plan-expand [] :bool
+  (let [src "version: 2.1\nparameters: {img: {type: string, default: \"3\"}}\nexecutors:\n  e:\n    parameters: {t: {type: string, default: \"1\"}}\n    docker: [{image: \"i:<< parameters.t >>\"}]\n    environment: {A: \"1\", B: \"1\"}\ncommands:\n  c:\n    parameters: {x: {type: boolean, default: true}, s: {type: steps, default: []}}\n    steps:\n      - when: {condition: << parameters.x >>, steps: [{run: yes-x}]}\n      - steps: << parameters.s >>\njobs:\n  j:\n    executor: {name: e, t: << pipeline.parameters.img >>}\n    environment: {B: \"2\"}\n    steps:\n      - c: {x: false, s: [{run: inner}]}\n      - c\nworkflows: {w: {jobs: [j]}}\n"
+        pr (t-plan src (y-map)) body (:body (t-job pr 0 0)) steps (y-get body "steps")]
+    (and (pl-ok? pr)
+         (tx-eq (:text (y-get (y-at (y-get body "docker") 0) "image")) "i:3")
+         (tx-eq (:text (y-get (y-get body "environment") "A")) "1") (tx-eq (:text (y-get (y-get body "environment") "B")) "2")
+         (= (y-n steps) 2) (tx-eq (:text (y-get (y-at steps 0) "run")) "inner") (tx-eq (:text (y-get (y-at steps 1) "run")) "yes-x"))))
+(defn test-runs [] :bool
+  (let [x (ap-runs-read "{\"items\":[{\"id\":\"j1\",\"name\":\"t\",\"status\":\"success\",\"job_number\":1,\"started_at\":\"2026-10-23T00:00:00Z\",\"stopped_at\":\"2026-10-23T00:01:00Z\",\"dependencies\":[]},{\"id\":\"j2\",\"name\":\"t\",\"status\":\"failed\",\"job_number\":2,\"started_at\":null,\"stopped_at\":null,\"dependencies\":[]}]}")
+        s (ap-runs-summary (:node x))
+        again (ap-runs-read (js-write (:node x)))
+        items (ap-runs-read (js-write (ap-runs-items (:node x))))]
+    (and (= (d-errors (:diags x)) 0)
+         (tx-eq (js-write (y-get s "flaky_jobs")) "[\"t\"]")
+         (tx-eq (:text (y-get (y-at (y-get s "by_job") 0) "mean_duration_ms")) "60000")
+         (y-equal? (:node again) (:node x)) (y-equal? (:node items) (:node x))
+         (d-has? (:diags (ap-runs-read "{\"items\":[{\"name\":\"t\",\"status\":\"exploded\",\"job_number\":1}]}")) "runs/unknown-status")
+         (d-has? (:diags (ap-runs-read "{\"items\":[{\"name\":\"t\",\"status\":\"success\",\"job_number\":1,\"started_at\":\"noon\"}]}")) "runs/bad-time")
+         (d-has? (:diags (ap-runs-read "{}")) "runs/shape")
+         (d-has? (:diags (ap-runs-read "{")) "runs/not-json"))))
+(defn test-junit [] :bool
+  (let [r1 "<testsuites><testsuite name=\"s\"><testcase classname=\"A\" name=\"x\" time=\"1.5\"/><testcase classname=\"A\" name=\"y\" time=\"0.25\"><failure message=\"boom\">trace</failure></testcase><testcase classname=\"A\" name=\"z\"><skipped/></testcase></testsuite></testsuites>"
+        r2 "<testsuite name=\"s\"><testcase classname=\"A\" name=\"y\" time=\"0.3\"/><testcase classname=\"A\" name=\"x\" time=\"2\"><error message=\"oops\"/></testcase></testsuite>"
+        x (ap-junit (-> (tx-strs) (conj r1) (conj r2)))
+        y (:node x)]
+    (and (= (d-errors (:diags x)) 0)
+         (tx-eq (js-write (y-at (y-get y "reports") 0)) "{\"tests\":3,\"passed\":1,\"failed\":1,\"errors\":0,\"skipped\":1,\"time_ms\":1750}")
+         (= (y-n (y-get y "flaky")) 2)
+         (tx-eq (:text (y-get (y-at (y-get y "slowest") 0) "test")) "A#x")
+         (tx-eq (:text (y-get (y-at (y-get y "slowest") 0) "max_ms")) "2000")
+         (d-has? (:diags (ap-junit (conj (tx-strs) "<html/>"))) "junit/shape")
+         (d-has? (:diags (ap-junit (conj (tx-strs) "<a>"))) "junit/not-xml")
+         (d-has? (:diags (ap-junit (tx-strs))) "junit/empty"))))
+(defn t-mcp [s :string] [:ref :kumitate/Y] (:node (js-parse (mc-handle s))))
+(defn test-mcp [] :bool
+  (let [init (t-mcp "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}")
+        list (t-mcp "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}")
+        call (t-mcp "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"kumitate_validate\",\"arguments\":{\"config\":\"version: 2\\n\"}}}")
+        bad (t-mcp "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"kumitate_plan\",\"arguments\":{\"config\":3}}}")]
+    (and (tx-eq (:text (y-get (y-get init "result") "protocolVersion")) "2025-03-26")
+         (tx-eq (:text (y-get (y-get (y-get init "result") "serverInfo") "name")) "kumitate")
+         (= (y-n (y-get (y-get list "result") "tools")) 8)
+         (y-true? (y-get (y-get call "result") "isError"))
+         (tx-eq (:text (y-get (y-at (y-get (y-get (y-get call "result") "structuredContent") "errors") 0) "code")) "config/version-unsupported")
+         (tx-eq (:text (y-get (y-get bad "error") "code")) "-32602")
+         (tx-eq (mc-handle "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}") "")
+         (tx-eq (:text (y-get (y-get (t-mcp "{oops") "error") "code")) "-32700")
+         (tx-eq (:text (y-get (y-get (t-mcp "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]") "error") "code")) "-32600")
+         (tx-eq (:text (y-get (y-get (t-mcp "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"resources/list\"}") "error") "code")) "-32601"))))

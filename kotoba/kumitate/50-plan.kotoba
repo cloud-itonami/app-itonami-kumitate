@@ -1,0 +1,496 @@
+;; 50-plan (prefix pl-): the processed pipeline of a checked config -- what
+;; CircleCI's `config process` and pipeline creation compute, with nothing run:
+;; pipeline parameters bound, << .. >> substituted, executors and commands
+;; expanded, when/unless steps and workflows decided, matrix jobs expanded,
+;; branch/tag filters applied, requires resolved into a DAG with levels.
+;;
+;; Inputs (a Y map, every key optional): parameters {name: value},
+;; branch, tag, values {"pipeline.number": 12, ...} for other << pipeline.* >>.
+;;
+;; Refusals (level 2): plan/parameter-missing, plan/parameter-type,
+;; plan/parameter-undeclared, plan/parameter-not-scalar, plan/executor-unknown,
+;; plan/command-unknown, plan/command-recursion, plan/job-unknown,
+;; plan/job-name-duplicate, plan/requires-unknown, plan/requires-cycle,
+;; plan/matrix-empty, plan/config-refused (cf-check refused the config).
+;; Warnings (level 1): plan/pipeline-value-unresolved (a << pipeline.* >> the
+;; caller did not give stays as written), plan/condition-unresolved.
+
+(defrecord XR [node [:ref :kumitate/Y] diags [:list [:ref :kumitate/D]]])
+;; a job in a workflow: its instance name, the job it runs, the alias that
+;; requires may name, its type, requirement names and the statuses each
+;; accepts, the resolved dependency indices, the processed body, and whether
+;; it runs (with the reason when not)
+(defrecord JI [name :string job :string alias :string type :string
+               reqs [:list :string] rstatus [:list :string] deps :vector-i64
+               body [:ref :kumitate/Y] filters [:ref :kumitate/Y] context [:ref :kumitate/Y]
+               level :i64 run :bool reason :string parallelism :i64])
+(defrecord WP [name :string run :bool reason :string jobs [:list [:ref :kumitate/JI]]])
+(defrecord PR [workflows [:list [:ref :kumitate/WP]] diags [:list [:ref :kumitate/D]]
+               params [:ref :kumitate/Y] root [:ref :kumitate/Y] branch :string tag :string])
+
+(defn pl-xr [y [:ref :kumitate/Y] ds [:list [:ref :kumitate/D]]] [:ref :kumitate/XR] (->XR y ds))
+;; ---------------------------------------------------------------------------
+;; Substitution
+
+;; the name inside a scalar that is exactly << name >>, or ""
+(defn pl-whole-ref [t0 :string] :string
+  (let [t (tx-trim t0)]
+    (if (and (tx-starts? t "<<") (tx-ends? t ">>") (= (tx-index-from t "<<" 2) -1))
+      (tx-trim (tx-sub t 2 (- (tx-len t) 2))) "")))
+(defn pl-subst-text [t :string env [:ref :kumitate/EV]] :string
+  (loop [i 0 acc ""]
+    (let [a (tx-index-from t "<<" i)]
+      (if (< a 0) (tx-cat acc (tx-from t i))
+        (let [b (tx-index-from t ">>" (+ a 2))]
+          (if (< b 0) (tx-cat acc (tx-from t i))
+            (let [name (tx-trim (tx-sub t (+ a 2) b)) v (pl-ref-value name env)]
+              (if (or (y-scalar? v) (y-null? v))
+                (recur (+ b 2) (tx-cat3 acc (tx-sub t i a) (if (y-null? v) "" (:text v))))
+                (recur (+ b 2) (tx-cat acc (tx-sub t i (+ b 2))))))))))))
+;; the value of what stands inside << >>: a name in env, or an expression that
+;; evaluates without unknowns; kind 7 when neither
+(defn pl-ref-value [inner :string env [:ref :kumitate/EV]] [:ref :kumitate/Y]
+  (let [k (ev-find env inner)]
+    (if (>= k 0) (nth (:vals env) k)
+      (let [r (ex-eval inner env)]
+        (if (and (ex-ok? r) (not (ex-unknown? (:v r)))) (:v r) (ex-unknown))))))
+(defn pl-subst [y [:ref :kumitate/Y] env [:ref :kumitate/EV]] [:ref :kumitate/Y]
+  (cond (y-scalar? y)
+          (let [w (pl-whole-ref (:text y)) v (if (tx-empty? w) (ex-unknown) (pl-ref-value w env))]
+            (cond (not (ex-unknown? v)) (if (y-scalar? v) (assoc v :line (:line y)) v)
+                  (tx-has? (:text y) "<<") (assoc y :text (pl-subst-text (:text y) env))
+                  :else y))
+        (y-map? y) (loop [i 0 acc (assoc (assoc y :keys (tx-strs)) :kids (y-list))]
+                     (if (>= i (y-n y)) acc
+                       (recur (+ i 1) (y-put acc (pl-subst-text (y-key y i) env) (pl-subst (y-at y i) env)))))
+        (y-seq? y) (loop [i 0 acc (assoc y :kids (y-list))]
+                     (if (>= i (y-n y)) acc (recur (+ i 1) (y-add acc (pl-subst (y-at y i) env)))))
+        :else y))
+;; the << .. >> left in y after substitution: errors for parameters.*, a
+;; warning for pipeline values the caller did not give
+(defn pl-leftovers [y [:ref :kumitate/Y] p :string env [:ref :kumitate/EV]] [:list [:ref :kumitate/D]]
+  (cond (y-scalar? y)
+          (loop [i 0 ds (d-list)]
+            (let [t (:text y) a (tx-index-from t "<<" i)]
+              (if (< a 0) ds
+                (let [b (tx-index-from t ">>" (+ a 2))]
+                  (if (< b 0) ds
+                    (let [name (tx-trim (tx-sub t (+ a 2) b)) k (ev-find env name) xr (ex-eval name env)]
+                      (recur (+ b 2)
+                        (cond (>= k 0) (conj ds (d-err "plan/parameter-not-scalar" p (tx-cat3 "<< " name " >> is not a scalar inside a string")))
+                              (and (ex-looks? name) (not (ex-ok? xr))) (conj ds (d-err "plan/expression" p (tx-cat4 (:err xr) ": << " name " >>")))
+                              (and (ex-looks? name) (ex-unknown? (:v xr))) (conj ds (d-warn "plan/expression-unresolved" p (tx-cat3 "<< " name " >> needs a pipeline value not given; kept as written")))
+                              (or (tx-starts? name "parameters.") (tx-starts? name "pipeline.parameters."))
+                                (conj ds (d-err "plan/parameter-missing" p (tx-cat3 "<< " name " >> has no value")))
+                              (tx-starts? name "matrix.") (conj ds (d-err "plan/parameter-missing" p (tx-cat3 "<< " name " >> has no matrix value")))
+                              (tx-starts? name "pipeline.") (conj ds (d-warn "plan/pipeline-value-unresolved" p (tx-cat3 "<< " name " >> is kept as written")))
+                              :else ds))))))))
+        (or (y-map? y) (y-seq? y))
+          (loop [i 0 ds (d-list)]
+            (if (>= i (y-n y)) ds
+              (recur (+ i 1) (d-cat ds (pl-leftovers (y-at y i) (if (y-map? y) (cf-path p (y-key y i)) (cf-pathi p i)) env)))))
+        :else (d-list)))
+
+;; ---------------------------------------------------------------------------
+;; Parameters
+
+;; bind declarations decls to the arguments args (a map): the values by name
+(defn pl-bind [decls [:ref :kumitate/Y] args [:ref :kumitate/Y] p :string] [:ref :kumitate/XR]
+  (let [given (loop [i 0 ds (d-list)]
+                (if (>= i (y-n args)) ds
+                  (recur (+ i 1) (if (y-has? decls (y-key args i)) ds
+                                   (conj ds (d-err "plan/parameter-undeclared" (cf-path p (y-key args i)) "no such parameter"))))))]
+    (loop [i 0 acc (y-map) ds given]
+      (if (>= i (y-n decls)) (pl-xr acc ds)
+        (let [name (y-key decls i) d (y-at decls i) t (:text (y-get d "type"))
+              v (cond (y-has? args name) (y-get args name)
+                      (y-has? d "default") (y-get d "default")
+                      :else (y-new 9 "" 0))
+              prob (if (= (:kind v) 9) "" (if (and (y-null? v) (tx-eq t "string")) "" (cf-default-problem t d v)))]
+          (cond (= (:kind v) 9) (recur (+ i 1) acc (conj ds (d-err "plan/parameter-missing" (cf-path p name) "no value and no default")))
+                (and (not (tx-empty? prob)) (tx-empty? (pl-whole-ref (:text v))))
+                  (recur (+ i 1) acc (conj ds (d-err "plan/parameter-type" (cf-path p name) prob)))
+                :else (recur (+ i 1) (y-put acc name (if (y-null? v) (y-str "") v)) ds)))))))
+
+;; the pipeline: parameters bound and the << pipeline.* >> values
+(defn pl-pipeline-env [root [:ref :kumitate/Y] inputs [:ref :kumitate/Y]] [:ref :kumitate/XR]
+  (let [b (pl-bind (y-get root "parameters") (if (y-map? (y-get inputs "parameters")) (y-get inputs "parameters") (y-map)) "parameters")
+        vals (if (y-map? (y-get inputs "values")) (y-get inputs "values") (y-map))
+        branch (:text (y-get inputs "branch")) tag (:text (y-get inputs "tag"))
+        v1 (if (tx-empty? branch) vals (y-set vals "pipeline.git.branch" (y-str branch)))
+        v2 (if (tx-empty? tag) v1 (y-set v1 "pipeline.git.tag" (y-str tag)))
+        ;; a pipeline is for a branch or for a tag: the other one is null
+        v3 (cond (and (not (tx-empty? branch)) (tx-empty? tag) (not (y-has? v2 "pipeline.git.tag"))) (y-set v2 "pipeline.git.tag" (y-null))
+                 (and (not (tx-empty? tag)) (tx-empty? branch) (not (y-has? v2 "pipeline.git.branch"))) (y-set v2 "pipeline.git.branch" (y-null))
+                 :else v2)]
+    (pl-xr (-> (y-map) (y-put "parameters" (:node b)) (y-put "values" v3)) (:diags b))))
+(defn pl-env0 [pe [:ref :kumitate/Y]] [:ref :kumitate/EV]
+  (ev-map (ev-map (ev-new) "pipeline.parameters." (y-get pe "parameters")) "" (y-get pe "values")))
+
+;; ---------------------------------------------------------------------------
+;; Logic
+
+;; 1 true, 0 false, -1 unknown (a value the caller did not give)
+(defn pl-eval3 [y [:ref :kumitate/Y] env [:ref :kumitate/EV]] :i64
+  (cond (y-null? y) 0
+        (y-scalar? y)
+          (let [t (tx-trim (:text y))]
+            (cond (tx-has? t "<<") -1
+                  (and (= (:kind y) 1) (or (ex-looks? t) (tx-starts? t "pipeline.")))
+                    (let [r (ex-eval t env)]
+                      (cond (not (ex-ok? r)) (if (ex-truthy? y) 1 0)
+                            (ex-unknown? (:v r)) -1
+                            (ex-truthy? (:v r)) 1
+                            :else 0))
+                  (ex-truthy? y) 1
+                  :else 0))
+        (y-seq? y) 1
+        (not (= (y-n y) 1)) 1
+        :else
+          (let [op (y-key y 0) v (y-at y 0)]
+            (cond (tx-eq op "and") (loop [i 0 u false] (cond (>= i (y-n v)) (if u -1 1)
+                                                             (= (pl-eval3 (y-at v i) env) 0) 0
+                                                             :else (recur (+ i 1) (or u (= (pl-eval3 (y-at v i) env) -1)))))
+                  (tx-eq op "or") (loop [i 0 u false] (cond (>= i (y-n v)) (if u -1 0)
+                                                            (= (pl-eval3 (y-at v i) env) 1) 1
+                                                            :else (recur (+ i 1) (or u (= (pl-eval3 (y-at v i) env) -1)))))
+                  (tx-eq op "not") (let [x (pl-eval3 v env)] (if (< x 0) -1 (- 1 x)))
+                  (tx-eq op "equal") (if (pl-unresolved? v) -1
+                                       (loop [i 1] (cond (>= i (y-n v)) 1 (y-equal? (y-at v 0) (y-at v i)) (recur (+ i 1)) :else 0)))
+                  (tx-eq op "matches") (if (pl-unresolved? (y-get v "value")) -1
+                                         (if (rx-matches? (:text (y-get v "pattern")) (:text (y-get v "value"))) 1 0))
+                  :else 1))))
+;; does any scalar in y still hold a << .. >>?
+(defn pl-unresolved? [y [:ref :kumitate/Y]] :bool
+  (cond (y-scalar? y) (tx-has? (:text y) "<<")
+        (or (y-map? y) (y-seq? y)) (loop [i 0] (cond (>= i (y-n y)) false (pl-unresolved? (y-at y i)) true :else (recur (+ i 1))))
+        :else false))
+
+;; ---------------------------------------------------------------------------
+;; Steps and commands
+
+(defn pl-steps [steps [:ref :kumitate/Y] root [:ref :kumitate/Y] env0 [:ref :kumitate/EV] p :string depth :i64] [:ref :kumitate/XR]
+  (let [items (cond (y-seq? steps) (:kids steps) (y-null? steps) (y-list) :else (conj (y-list) steps))]
+    (loop [i 0 acc (y-seq) ds (d-list)]
+      (if (>= i (count items)) (pl-xr acc ds)
+        (let [r (pl-step (nth items i) root env0 (cf-pathi p i) depth)]
+          (recur (+ i 1) (pl-splice acc (:node r)) (d-cat ds (:diags r))))))))
+;; append the steps of seq b to seq a
+(defn pl-splice [a [:ref :kumitate/Y] b [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (loop [i 0 acc a] (if (< i (y-n b)) (recur (+ i 1) (y-add acc (y-at b i))) acc)))
+(defn pl-one [y [:ref :kumitate/Y]] [:ref :kumitate/Y] (y-add (y-seq) y))
+;; one step -> a list of steps (a command expands, when/unless decide, a steps
+;; parameter splices)
+(defn pl-step [s [:ref :kumitate/Y] root [:ref :kumitate/Y] env0 [:ref :kumitate/EV] p :string depth :i64] [:ref :kumitate/XR]
+  (let [cmds (y-get root "commands")]
+    (cond (> depth 16) (pl-xr (y-seq) (conj (d-list) (d-err "plan/command-recursion" p "commands nest deeper than 16")))
+          (y-seq? s) (pl-steps s root env0 p depth)
+          (y-null? s) (pl-xr (y-seq) (d-list))
+          (y-scalar? s)
+            (cond (tx-member? (cf-builtin-steps) (:text s)) (pl-xr (pl-one s) (d-list))
+                  (y-has? cmds (:text s)) (pl-invoke (:text s) (y-map) root env0 p depth)
+                  :else (pl-xr (y-seq) (conj (d-list) (d-err "plan/command-unknown" p (:text s)))))
+          (and (y-map? s) (= (y-n s) 1))
+            (let [name (y-key s 0) a (y-at s 0)]
+              (cond (or (tx-eq name "when") (tx-eq name "unless"))
+                      (let [c (y-get a "condition") x (pl-eval3 c env0)
+                            go (cond (< x 0) true (tx-eq name "when") (= x 1) :else (= x 0))
+                            w (if (< x 0) (conj (d-list) (d-warn "plan/condition-unresolved" p "the condition needs a value not given; its steps are kept")) (d-list))]
+                        (if go (let [r (pl-steps (y-get a "steps") root env0 (cf-path (cf-path p name) "steps") depth)] (pl-xr (:node r) (d-cat w (:diags r))))
+                          (pl-xr (y-seq) w)))
+                    (tx-eq name "steps") (pl-steps a root env0 (cf-path p name) depth)
+                    (tx-eq name "deploy") (pl-xr (pl-one (y-put (y-map) "run" a)) (d-list))
+                    (tx-member? (cf-builtin-steps) name) (pl-xr (pl-one s) (d-list))
+                    (y-has? cmds name) (pl-invoke name (if (y-map? a) a (y-map)) root env0 (cf-path p name) depth)
+                    :else (pl-xr (y-seq) (conj (d-list) (d-err "plan/command-unknown" p name)))))
+          :else (pl-xr (y-seq) (conj (d-list) (d-err "config/step-shape" p "a step is a name or a one-key mapping"))))))
+(defn pl-invoke [name :string args [:ref :kumitate/Y] root [:ref :kumitate/Y] env0 [:ref :kumitate/EV] p :string depth :i64] [:ref :kumitate/XR]
+  (let [c (y-get (y-get root "commands") name)
+        b (pl-bind (y-get c "parameters") args p)
+        env (ev-map env0 "parameters." (:node b))
+        body (pl-subst (y-get c "steps") env)
+        r (pl-steps body root env0 (cf-path (tx-cat "commands." name) "steps") (+ depth 1))]
+    (pl-xr (:node r) (-> (:diags b) (d-cat (pl-leftovers body (cf-path (tx-cat "commands." name) "steps") env)) (d-cat (:diags r))))))
+
+;; ---------------------------------------------------------------------------
+;; Jobs
+
+(defn pl-job-keys-kept [] [:list :string]
+  (-> (tx-strs) (conj "type") (conj "docker") (conj "machine") (conj "macos") (conj "resource_class") (conj "shell")
+      (conj "working_directory") (conj "parallelism") (conj "environment") (conj "circleci_ip_ranges") (conj "retention")))
+;; executor e (a name or {name: .., args}) -> its body bound and substituted
+(defn pl-executor [e [:ref :kumitate/Y] root [:ref :kumitate/Y] env0 [:ref :kumitate/EV] p :string] [:ref :kumitate/XR]
+  (let [name (if (y-map? e) (:text (y-get e "name")) (:text e))
+        args (if (y-map? e) (y-del e "name") (y-map))
+        d (y-get (y-get root "executors") name)]
+    (if (not (y-map? d)) (pl-xr (y-map) (conj (d-list) (d-err "plan/executor-unknown" p (tx-cat3 "no executor `" name "`"))))
+      (let [b (pl-bind (y-get d "parameters") args (cf-path p "executor"))
+            env (ev-map env0 "parameters." (:node b))
+            body (pl-subst (y-del d "parameters") env)]
+        (pl-xr body (d-cat (:diags b) (pl-leftovers body (tx-cat "executors." name) env)))))))
+;; job j bound to args: the processed job body
+(defn pl-job [jname :string args [:ref :kumitate/Y] root [:ref :kumitate/Y] env0 [:ref :kumitate/EV]
+              pre [:ref :kumitate/Y] post [:ref :kumitate/Y] p :string] [:ref :kumitate/XR]
+  (let [j (y-get (y-get root "jobs") jname)
+        b (pl-bind (y-get j "parameters") args p)
+        env (ev-map env0 "parameters." (:node b))
+        body (pl-subst (y-del j "parameters") env)
+        left (pl-leftovers (y-del body "steps") (tx-cat "jobs." jname) env)
+        ex (if (y-has? body "executor") (pl-executor (y-get body "executor") root env0 p) (pl-xr (y-map) (d-list)))
+        ;; executor keys first, the job's own keys win; environment merges
+        merged (loop [i 0 acc (:node ex)]
+                 (if (>= i (y-n body)) acc
+                   (let [k (y-key body i) v (y-at body i)]
+                     (recur (+ i 1)
+                       (cond (or (tx-eq k "executor") (tx-eq k "steps") (tx-eq k "description")) acc
+                             (and (tx-eq k "environment") (y-map? (y-get acc "environment")) (y-map? v))
+                               (y-set acc k (loop [q 0 m (y-get acc "environment")] (if (< q (y-n v)) (recur (+ q 1) (y-set m (y-key v q) (y-at v q))) m)))
+                             :else (y-set acc k v))))))
+        kept (loop [i 0 acc (y-map)]
+               (if (>= i (y-n merged)) acc
+                 (recur (+ i 1) (if (tx-member? (pl-job-keys-kept) (y-key merged i)) (y-put acc (y-key merged i) (y-at merged i)) acc))))
+        prer (pl-steps (pl-subst pre env0) root env0 (cf-path p "pre-steps") 0)
+        mainr (pl-steps (y-get body "steps") root env0 (tx-cat3 "jobs." jname ".steps") 0)
+        postr (pl-steps (pl-subst post env0) root env0 (cf-path p "post-steps") 0)
+        steps (pl-splice (pl-splice (:node prer) (:node mainr)) (:node postr))]
+    (pl-xr (y-put kept "steps" steps)
+           (-> (:diags b) (d-cat left) (d-cat (:diags ex)) (d-cat (:diags prer)) (d-cat (:diags mainr))
+               (d-cat (pl-leftovers (y-get body "steps") (tx-cat3 "jobs." jname ".steps") env)) (d-cat (:diags postr))))))
+
+;; ---------------------------------------------------------------------------
+;; Filters
+
+(defn pl-pattern-match? [pat :string s :string] :bool
+  (if (and (>= (tx-len pat) 2) (tx-starts? pat "/") (tx-ends? pat "/"))
+    (rx-matches? (tx-sub pat 1 (- (tx-len pat) 1)) s)
+    (tx-eq pat s)))
+(defn pl-any-match? [v [:ref :kumitate/Y] s :string] :bool
+  (cond (y-scalar? v) (pl-pattern-match? (:text v) s)
+        (y-seq? v) (loop [i 0] (cond (>= i (y-n v)) false (pl-pattern-match? (:text (y-at v i)) s) true :else (recur (+ i 1))))
+        :else false))
+;; "" when the job runs for this branch/tag, else the reason
+(defn pl-filter [f [:ref :kumitate/Y] branch :string tag :string env [:ref :kumitate/EV]] :string
+  (let [bf (y-get f "branches") tf (y-get f "tags")]
+    (cond (y-scalar? f)
+            (let [r (ex-eval (:text f) env)]
+              (cond (not (ex-ok? r)) "" (ex-unknown? (:v r)) "" (ex-truthy? (:v r)) "" :else "filters/expression-false"))
+          (not (tx-empty? tag))
+            (cond (not (y-has? tf "only")) "filters/tag-not-selected"
+                  (not (pl-any-match? (y-get tf "only") tag)) "filters/tag-not-selected"
+                  (pl-any-match? (y-get tf "ignore") tag) "filters/tag-ignored"
+                  :else "")
+          (not (tx-empty? branch))
+            (cond (and (y-has? bf "only") (not (pl-any-match? (y-get bf "only") branch))) "filters/branch-not-selected"
+                  (pl-any-match? (y-get bf "ignore") branch) "filters/branch-ignored"
+                  :else "")
+          :else "")))
+
+;; ---------------------------------------------------------------------------
+;; Workflows
+
+(defn pl-wf-keys [] [:list :string] (cf-wf-job-keys))
+(defn pl-args [a [:ref :kumitate/Y]] [:ref :kumitate/Y]
+  (loop [i 0 acc (y-map)]
+    (if (>= i (y-n a)) acc
+      (recur (+ i 1) (if (tx-member? (pl-wf-keys) (y-key a i)) acc (y-put acc (y-key a i) (y-at a i)))))))
+;; the requirement names of r and the statuses each accepts ("success" when none)
+(defn pl-req-names [r [:ref :kumitate/Y]] [:list :string]
+  (loop [i 0 acc (tx-strs)]
+    (if (>= i (y-n r)) acc
+      (let [e (y-at r i)] (recur (+ i 1) (conj acc (if (y-map? e) (y-key e 0) (:text e))))))))
+(defn pl-req-status [r [:ref :kumitate/Y]] [:list :string]
+  (loop [i 0 acc (tx-strs)]
+    (if (>= i (y-n r)) acc
+      (let [e (y-at r i)
+            st (if (y-map? e) (y-at e 0) (y-null))
+            s (cond (y-scalar? st) (:text st)
+                    (y-seq? st) (tx-join (loop [k 0 l (tx-strs)] (if (< k (y-n st)) (recur (+ k 1) (conj l (:text (y-at st k)))) l)) ",")
+                    :else "success")]
+        (recur (+ i 1) (conj acc s))))))
+
+;; the combinations of a matrix: a list of maps param -> value, keys in name order
+(defn pl-matrix [m [:ref :kumitate/Y]] [:list [:ref :kumitate/Y]]
+  (let [ps (y-get m "parameters") names (tx-sort (:keys ps)) ex (y-get m "exclude")
+        combos (loop [k 0 acc (conj (y-list) (y-map))]
+                 (if (>= k (count names)) acc
+                   (let [vals (y-get ps (nth names k))]
+                     (recur (+ k 1)
+                       (loop [c 0 out (y-list)]
+                         (if (>= c (count acc)) out
+                           (recur (+ c 1)
+                             (loop [v 0 o2 out] (if (>= v (y-n vals)) o2 (recur (+ v 1) (conj o2 (y-put (nth acc c) (nth names k) (y-at vals v)))))))))))))]
+    (loop [c 0 out (y-list)]
+      (if (>= c (count combos)) out
+        (let [x (nth combos c)
+              excluded (loop [e 0] (cond (>= e (y-n ex)) false
+                                         (pl-combo-is? x (y-at ex e)) true
+                                         :else (recur (+ e 1))))]
+          (recur (+ c 1) (if excluded out (conj out x))))))))
+(defn pl-combo-is? [x [:ref :kumitate/Y] e [:ref :kumitate/Y]] :bool
+  (and (y-map? e) (= (y-n e) (y-n x))
+       (loop [i 0] (cond (>= i (y-n e)) true
+                         (and (y-has? x (y-key e i)) (y-equal? (y-get x (y-key e i)) (y-at e i))) (recur (+ i 1))
+                         :else false))))
+(defn pl-combo-name [base :string x [:ref :kumitate/Y]] :string
+  (loop [i 0 s base] (if (< i (y-n x)) (recur (+ i 1) (tx-cat3 s "-" (:text (y-at x i)))) s)))
+
+(defn pl-ji [name :string job :string alias :string type :string reqs [:ref :kumitate/Y]
+             body [:ref :kumitate/Y] filters [:ref :kumitate/Y] context [:ref :kumitate/Y] par :i64] [:ref :kumitate/JI]
+  (->JI name job alias type (pl-req-names reqs) (pl-req-status reqs) (vector-alloc 0) body filters context 0 true "" par))
+(defn pl-par [body [:ref :kumitate/Y]] :i64
+  (let [p (y-get body "parallelism")] (if (y-intv? p) (max 1 (tx-int (:text p))) 1)))
+
+;; the instances of one workflow entry
+(defrecord IR [items [:list [:ref :kumitate/JI]] diags [:list [:ref :kumitate/D]]])
+(defn pl-entry [e [:ref :kumitate/Y] root [:ref :kumitate/Y] env0 [:ref :kumitate/EV] p :string] [:ref :kumitate/IR]
+  (let [base (if (y-map? e) (y-key e 0) (:text e))
+        a (if (and (y-map? e) (y-map? (y-at e 0))) (y-at e 0) (y-map))
+        job (y-get (y-get root "jobs") base)
+        type (cond (y-has? a "type") (:text (y-get a "type")) (y-has? job "type") (:text (y-get job "type")) :else "build")
+        m (y-get a "matrix")
+        combos (if (y-map? m) (pl-matrix m) (conj (y-list) (y-map)))
+        alias (cond (y-has? m "alias") (:text (y-get m "alias")) (y-map? m) base :else "")
+        items (typed-list-new [:list [:ref :kumitate/JI]])]
+    (if (= (count combos) 0) (->IR items (conj (d-list) (d-err "plan/matrix-empty" p "every combination is excluded")))
+      (loop [c 0 out items ds (d-list)]
+        (if (>= c (count combos)) (->IR out ds)
+          (let [x (nth combos c)
+                env (ev-map env0 "matrix." x)
+                a2 (pl-subst a env)
+                name (cond (y-has? a2 "name") (:text (y-get a2 "name")) (y-map? m) (pl-combo-name base x) :else base)
+                args (loop [i 0 acc (pl-args a2)] (if (< i (y-n x)) (recur (+ i 1) (y-set acc (y-key x i) (y-at x i))) acc))
+                q (cf-path p name)
+                jr (if (or (tx-eq type "approval") (tx-eq type "no-op"))
+                     (pl-xr (y-put (y-map) "type" (y-str type)) (d-list))
+                     (if (y-map? job)
+                       (pl-job base args root env0 (y-get a2 "pre-steps") (y-get a2 "post-steps") q)
+                       (pl-xr (y-map) (conj (d-list) (d-err "plan/job-unknown" q base)))))
+                ji (pl-ji name base alias type (if (y-seq? (y-get a2 "requires")) (y-get a2 "requires") (y-seq))
+                          (:node jr) (y-get a2 "filters") (y-get a2 "context") (pl-par (:node jr)))]
+            (recur (+ c 1) (conj out ji) (d-cat ds (:diags jr)))))))))
+
+;; requires -> dependency indices; levels; cycles
+(defn pl-resolve [jobs [:list [:ref :kumitate/JI]] p :string] [:ref :kumitate/IR]
+  (loop [i 0 out (typed-list-new [:list [:ref :kumitate/JI]]) ds (d-list)]
+    (if (>= i (count jobs)) (->IR out ds)
+      (let [ji (nth jobs i)
+            r (loop [k 0 deps (vector-alloc 0) d2 (d-list)]
+                (if (>= k (count (:reqs ji))) (->XR (y-new 4 "" 0) d2)
+                  (let [want (nth (:reqs ji) k)
+                        hits (loop [q 0 h (vector-alloc 0)]
+                               (if (>= q (count jobs)) h
+                                 (recur (+ q 1) (if (or (tx-eq (:name (nth jobs q)) want) (and (not (tx-empty? (:alias (nth jobs q)))) (tx-eq (:alias (nth jobs q)) want)))
+                                                  (vector-conj h q) h))))]
+                    (if (= (vector-count hits) 0)
+                      (recur (+ k 1) deps (conj d2 (d-err "plan/requires-unknown" (cf-path (cf-path p (:name ji)) "requires") (tx-cat3 "no job `" want "` in this workflow"))))
+                      (recur (+ k 1) (rx-vcat deps hits) d2)))))
+            deps (loop [k 0 deps (vector-alloc 0)]
+                   (if (>= k (count (:reqs ji))) deps
+                     (let [want (nth (:reqs ji) k)]
+                       (recur (+ k 1)
+                         (loop [q 0 h deps]
+                           (if (>= q (count jobs)) h
+                             (recur (+ q 1) (if (or (tx-eq (:name (nth jobs q)) want) (and (not (tx-empty? (:alias (nth jobs q)))) (tx-eq (:alias (nth jobs q)) want)))
+                                              (vector-conj h q) h))))))))]
+        (recur (+ i 1) (conj out (assoc ji :deps deps)) (d-cat ds (:diags r)))))))
+;; the requirement index k of job ji that dependency d came from (for its statuses)
+(defn pl-dep-status [jobs [:list [:ref :kumitate/JI]] ji [:ref :kumitate/JI] d :i64] :string
+  (let [dj (nth jobs d)]
+    (loop [k 0] (cond (>= k (count (:reqs ji))) "success"
+                      (or (tx-eq (nth (:reqs ji) k) (:name dj)) (tx-eq (nth (:reqs ji) k) (:alias dj))) (nth (:rstatus ji) k)
+                      :else (recur (+ k 1))))))
+;; levels by longest path; -1 marks a job on a cycle
+(defn pl-levels [jobs [:list [:ref :kumitate/JI]]] :vector-i64
+  (let [n (count jobs)]
+    (loop [pass 0 lv (vector-alloc n)]
+      (let [next (loop [i 0 v lv]
+                   (if (>= i n) v
+                     (let [ji (nth jobs i)
+                           l (loop [k 0 best 0]
+                               (if (>= k (vector-count (:deps ji))) best
+                                 (recur (+ k 1) (max best (+ 1 (vector-at lv (vector-at (:deps ji) k)))))))]
+                       (recur (+ i 1) (vector-assoc v i l)))))
+            same (loop [i 0] (cond (>= i n) true (= (vector-at next i) (vector-at lv i)) (recur (+ i 1)) :else false))]
+        (cond same next
+              (> pass (+ n 1)) (loop [i 0 v next] (if (>= i n) v (recur (+ i 1) (if (> (vector-at next i) n) (vector-assoc v i -1) v))))
+              :else (recur (+ pass 1) next))))))
+;; which jobs run: filters, then requirements in level order
+(defn pl-runs [jobs [:list [:ref :kumitate/JI]] lv :vector-i64 wfrun :bool wfreason :string branch :string tag :string env [:ref :kumitate/EV]] [:list [:ref :kumitate/JI]]
+  (let [n (count jobs)
+        maxl (loop [i 0 m 0] (if (< i n) (recur (+ i 1) (max m (vector-at lv i))) m))]
+    (loop [l 0 out (loop [i 0 o (typed-list-new [:list [:ref :kumitate/JI]])]
+                      (if (>= i n) o
+                        (let [ji (nth jobs i) fr (pl-filter (:filters ji) branch tag env)]
+                          (recur (+ i 1) (conj o (cond (not wfrun) (assoc (assoc (assoc ji :level (vector-at lv i)) :run false) :reason wfreason)
+                                                       (< (vector-at lv i) 0) (assoc (assoc (assoc ji :level -1) :run false) :reason "plan/requires-cycle")
+                                                       (not (tx-empty? fr)) (assoc (assoc (assoc ji :level (vector-at lv i)) :run false) :reason fr)
+                                                       :else (assoc ji :level (vector-at lv i))))))))]
+      (if (> l maxl) out
+        (recur (+ l 1)
+          (loop [i 0 o (typed-list-new [:list [:ref :kumitate/JI]])]
+            (if (>= i n) o
+              (let [ji (nth out i)]
+                (recur (+ i 1)
+                  (conj o (if (and (:run ji) (= (:level ji) l)
+                                   (loop [k 0] (cond (>= k (vector-count (:deps ji))) false
+                                                     (let [d (vector-at (:deps ji) k)]
+                                                       (and (not (:run (nth out d))) (not (tx-has? (pl-dep-status out ji d) "not_run")))) true
+                                                     :else (recur (+ k 1)))))
+                            (assoc (assoc ji :run false) :reason "plan/upstream-not-run")
+                            ji)))))))))))
+
+(defn pl-plan [root [:ref :kumitate/Y] inputs [:ref :kumitate/Y]] [:ref :kumitate/PR]
+  (let [checked (cf-check root)
+        branch (:text (y-get inputs "branch")) tag (:text (y-get inputs "tag"))
+        empty (typed-list-new [:list [:ref :kumitate/WP]])]
+    (if (> (d-errors checked) 0)
+      (->PR empty (conj checked (d-err "plan/config-refused" "" "the config is refused; nothing is planned")) (y-map) root branch tag)
+      (let [pe (pl-pipeline-env root inputs)
+            env0 (pl-env0 (:node pe))
+            wfs (y-get root "workflows")]
+        (if (> (d-errors (:diags pe)) 0)
+          (->PR empty (d-cat checked (:diags pe)) (y-get (:node pe) "parameters") root branch tag)
+          (loop [i 0 out empty ds (d-cat checked (:diags pe))]
+            (if (>= i (y-n wfs)) (->PR out ds (y-get (:node pe) "parameters") root branch tag)
+              (let [name (y-key wfs i)]
+                (if (tx-eq name "version") (recur (+ i 1) out ds)
+                  (let [w (pl-workflow-wp name (y-at wfs i) root env0 branch tag)]
+                    (recur (+ i 1) (conj out (:wp w)) (d-cat ds (:diags w)))))))))))))
+(defrecord WR [wp [:ref :kumitate/WP] diags [:list [:ref :kumitate/D]]])
+(defn pl-workflow-wp [name :string w [:ref :kumitate/Y] root [:ref :kumitate/Y] env0 [:ref :kumitate/EV] branch :string tag :string] [:ref :kumitate/WR]
+  (let [p (cf-path "workflows" name)
+        wenv (pl-subst (y-del w "jobs") env0)
+        when (y-get wenv "when") unless (y-get wenv "unless")
+        w3 (if (y-has? wenv "when") (pl-eval3 when env0) 1)
+        u3 (if (y-has? wenv "unless") (pl-eval3 unless env0) 0)
+        run (and (not (= w3 0)) (not (= u3 1)))
+        cw (if (or (< w3 0) (< u3 0)) (conj (d-list) (d-warn "plan/condition-unresolved" p "the condition needs a value not given; the workflow is kept")) (d-list))
+        reason (cond run "" (y-has? wenv "when") "workflow/when-false" :else "workflow/unless-true")
+        es (y-get w "jobs")
+        ir (loop [k 0 items (typed-list-new [:list [:ref :kumitate/JI]]) ds cw]
+             (if (>= k (y-n es)) (->IR items ds)
+               (let [r (pl-entry (y-at es k) root env0 (cf-pathi (cf-path p "jobs") k))]
+                 (recur (+ k 1) (loop [q 0 it items] (if (< q (count (:items r))) (recur (+ q 1) (conj it (nth (:items r) q))) it))
+                        (d-cat ds (:diags r))))))
+        dups (loop [i 0 ds (d-list) seen (tx-strs)]
+               (if (>= i (count (:items ir))) ds
+                 (let [nm (:name (nth (:items ir) i))]
+                   (recur (+ i 1) (if (tx-member? seen nm) (conj ds (d-err "plan/job-name-duplicate" (cf-path p nm) "two jobs of this workflow have this name")) ds) (conj seen nm)))))
+        rr (pl-resolve (:items ir) p)
+        lv (pl-levels (:items rr))
+        cyc (loop [i 0] (cond (>= i (vector-count lv)) false (< (vector-at lv i) 0) true :else (recur (+ i 1))))
+        jobs (pl-runs (:items rr) lv run reason branch tag env0)
+        fdiag (loop [i 0 ds (d-list)]
+                (if (>= i (count jobs)) ds
+                  (let [f (:filters (nth jobs i)) q (cf-path (cf-path p (:name (nth jobs i))) "filters")]
+                    (recur (+ i 1)
+                      (if (not (y-scalar? f)) ds
+                        (let [r (ex-eval (:text f) env0)]
+                          (cond (not (ex-ok? r)) (conj ds (d-err "plan/filter-expression" q (tx-cat3 (:err r) ": " (:text f))))
+                                (ex-unknown? (:v r)) (conj ds (d-warn "plan/filter-unresolved" q "the filter needs a pipeline value not given; the job is kept"))
+                                :else ds)))))))]
+    (->WR (->WP name run reason jobs)
+          (-> (:diags ir) (d-cat dups) (d-cat (:diags rr)) (d-cat fdiag)
+              (d-cat (if cyc (conj (d-list) (d-err "plan/requires-cycle" p "requires go round in a circle")) (d-list)))))))
+
+(defn pl-ok? [pr [:ref :kumitate/PR]] :bool (= (d-errors (:diags pr)) 0))

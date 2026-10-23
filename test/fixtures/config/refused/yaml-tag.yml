@@ -1,0 +1,4 @@
+version: 2.1
+jobs:
+  build: !!map
+    docker: [{image: cimg/base:stable}]

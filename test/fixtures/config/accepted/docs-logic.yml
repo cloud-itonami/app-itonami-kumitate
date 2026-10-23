@@ -1,0 +1,51 @@
+# After the CircleCI configuration reference "Logic statement syntax":
+# and, or, not, equal, matches over pipeline parameters and values.
+version: 2.1
+parameters:
+  deploy:
+    type: boolean
+    default: false
+  target:
+    type: enum
+    enum: [staging, production]
+    default: staging
+  retries:
+    type: integer
+    default: 2
+jobs:
+  ship:
+    parameters:
+      to:
+        type: string
+    machine:
+      image: ubuntu-2204:current
+    resource_class: arm.medium
+    steps:
+      - unless:
+          condition:
+            equal: [production, << parameters.to >>]
+          steps:
+            - run: echo not production
+      - run: ./ship --to << parameters.to >> --retries << pipeline.parameters.retries >>
+workflows:
+  ship-staging:
+    when:
+      and:
+        - << pipeline.parameters.deploy >>
+        - equal: [staging, << pipeline.parameters.target >>]
+    jobs:
+      - ship: {to: staging}
+  ship-production:
+    when:
+      and:
+        - << pipeline.parameters.deploy >>
+        - not:
+            equal: [staging, << pipeline.parameters.target >>]
+        - matches: {pattern: "^release/.+$", value: << pipeline.git.branch >>}
+    jobs:
+      - ship: {to: production}
+  always:
+    unless:
+      or: [false, << pipeline.parameters.deploy >>]
+    jobs:
+      - ship: {to: none}

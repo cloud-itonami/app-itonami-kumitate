@@ -1,0 +1,10 @@
+version: 2.1
+jobs:
+  a: {docker: [{image: cimg/base:stable}], steps: [checkout]}
+workflows:
+  w:
+    jobs:
+      - a:
+          filters:
+            branches:
+              only: /release-(?=x)/

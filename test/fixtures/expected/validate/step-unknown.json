@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"config/step-unknown","path":"jobs.a.steps[1]","message":"`install-deps` is no built-in step and no command"},{"code":"config/run-command-missing","path":"jobs.a.steps[2].run","message":"run needs a command"}],"warnings":[]}

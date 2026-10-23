@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"plan/requires-cycle","path":"workflows.w","message":"requires go round in a circle"}],"warnings":[]}

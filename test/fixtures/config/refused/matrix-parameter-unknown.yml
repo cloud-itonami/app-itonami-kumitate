@@ -1,0 +1,15 @@
+version: 2.1
+jobs:
+  t:
+    parameters:
+      v: {type: string}
+    docker: [{image: cimg/base:stable}]
+    steps: [{run: echo << parameters.v >>}]
+workflows:
+  w:
+    jobs:
+      - t:
+          matrix:
+            parameters:
+              v: ["1"]
+              os: [linux]

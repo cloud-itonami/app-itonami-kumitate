@@ -1,0 +1,16 @@
+;; kumitate -- the unit's one ns form and its records (see kotoba/kumitate/MANIFEST).
+;; Every other module is a plain list of definitions; a unit is the files of a
+;; manifest concatenated in order, each followed by one newline.
+(ns kumitate (:export [main]))
+
+;; A document node, for YAML, JSON and XML alike.
+;;   kind 0 null, 1 plain scalar (text as written: true, 12, foo), 2 string
+;;   (quoted in YAML, any JSON string), 3 mapping (keys and kids in parallel),
+;;   4 sequence (kids), 6 XML element (text = tag; keys/kids = attributes, and
+;;   child elements under the key "<>").
+;;   line is 1-based in the source text, 0 when made by kumitate.
+(defrecord Y [kind :i64 text :string keys [:list :string] kids [:list [:ref :kumitate/Y]] line :i64])
+
+;; A diagnostic. level 2 refuses the input, 1 warns. code is the named reason
+;; (yaml/..., config/..., plan/...), path where it is (jobs.build.steps[2]).
+(defrecord D [level :i64 code :string path :string msg :string])

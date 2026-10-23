@@ -1,0 +1,3 @@
+<?xml version="1.0"?>
+<!DOCTYPE testsuite [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<testsuite><testcase classname="a" name="&xxe;"/></testsuite>

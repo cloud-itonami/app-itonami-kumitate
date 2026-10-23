@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"junit/not-xml","path":"reports[0]","message":"xml/doctype-unsupported at byte 22"}],"warnings":[]}

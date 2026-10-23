@@ -1,0 +1,90 @@
+# test/fixtures/MANIFEST -- `kumitate selftest` reads this. Each line:
+#   COMMAND EXPECTED INPUT [ARGS..]
+# paths relative to this file. The output of `kumitate COMMAND INPUT ARGS..`
+# must equal EXPECTED byte for byte. Sources of the third-party configs:
+# config/SOURCES.edn.
+
+# accepted configs: validate
+validate expected/validate/docs-hello-world.json config/accepted/docs-hello-world.yml
+validate expected/validate/docs-reusable-config.json config/accepted/docs-reusable-config.yml
+validate expected/validate/docs-matrix.json config/accepted/docs-matrix.yml
+validate expected/validate/docs-workflow-filters.json config/accepted/docs-workflow-filters.yml
+validate expected/validate/docs-expressions.json config/accepted/docs-expressions.yml
+validate expected/validate/docs-logic.json config/accepted/docs-logic.yml
+validate expected/validate/yaml-anchors.json config/accepted/yaml-anchors.yml
+validate expected/validate/amu-selfhost-native.json config/accepted/amu-selfhost-native.yml
+validate expected/validate/real-clj-kondo.json config/accepted/real-clj-kondo.yml
+validate expected/validate/real-borkdude-jet.json config/accepted/real-borkdude-jet.yml
+validate expected/validate/real-babashka-nbb.json config/accepted/real-babashka-nbb.yml
+validate expected/validate/real-mithril-agent-runtime.json config/accepted/real-mithril-agent-runtime.yml
+validate expected/validate/real-apollo-client.json config/accepted/real-apollo-client.yml
+
+# refused configs: validate (each names its reason)
+validate expected/validate/docs-orbs-matrix.json config/refused/docs-orbs-matrix.yml
+validate expected/validate/inline-orb.json config/refused/inline-orb.yml
+validate expected/validate/real-babashka-setup-orb.json config/refused/real-babashka-setup-orb.yml
+validate expected/validate/real-gatsby-orbs.json config/refused/real-gatsby-orbs.yml
+validate expected/validate/real-telegraf-orbs.json config/refused/real-telegraf-orbs.yml
+validate expected/validate/real-org-babashka-nbb-2.0.json config/refused/real-org-babashka-nbb-2.0.yml
+validate expected/validate/version-2.0.json config/refused/version-2.0.yml
+validate expected/validate/yaml-tab-indent.json config/refused/yaml-tab-indent.yml
+validate expected/validate/yaml-duplicate-key.json config/refused/yaml-duplicate-key.yml
+validate expected/validate/yaml-unknown-alias.json config/refused/yaml-unknown-alias.yml
+validate expected/validate/yaml-tag.json config/refused/yaml-tag.yml
+validate expected/validate/yaml-two-documents.json config/refused/yaml-two-documents.yml
+validate expected/validate/job-unknown.json config/refused/job-unknown.yml
+validate expected/validate/job-groups.json config/refused/job-groups.yml
+validate expected/validate/job-name-duplicate.json config/refused/job-name-duplicate.yml
+validate expected/validate/requires-cycle.json config/refused/requires-cycle.yml
+validate expected/validate/requires-unknown.json config/refused/requires-unknown.yml
+validate expected/validate/requires-status-bad.json config/refused/requires-status-bad.yml
+validate expected/validate/parameter-missing.json config/refused/parameter-missing.yml
+validate expected/validate/parameter-default-type.json config/refused/parameter-default-type.yml
+validate expected/validate/parameter-unknown-ref.json config/refused/parameter-unknown-ref.yml
+validate expected/validate/executor-multiple.json config/refused/executor-multiple.yml
+validate expected/validate/filter-regex-bad.json config/refused/filter-regex-bad.yml
+validate expected/validate/filter-expression-bad.json config/refused/filter-expression-bad.yml
+validate expected/validate/matrix-parameter-unknown.json config/refused/matrix-parameter-unknown.yml
+validate expected/validate/step-unknown.json config/refused/step-unknown.yml
+
+# plans, processed configs, API shapes and local plans
+plan expected/plan/docs-workflow-filters-main.json config/accepted/docs-workflow-filters.yml --branch main
+plan expected/plan/docs-workflow-filters-dependabot.json config/accepted/docs-workflow-filters.yml --branch dependabot/npm/x
+plan expected/plan/docs-workflow-filters-tag.json config/accepted/docs-workflow-filters.yml --tag v1.2.3
+plan expected/plan/docs-expressions-main.json config/accepted/docs-expressions.yml --branch main --param my-custom-param=DEPLOY:x
+plan expected/plan/docs-expressions-feature.json config/accepted/docs-expressions.yml --branch feature/x
+plan expected/plan/docs-logic-production.json config/accepted/docs-logic.yml --branch release/1.0 --param deploy=true --param target=production
+plan expected/plan/docs-matrix.json config/accepted/docs-matrix.yml
+plan expected/plan/amu-selfhost-native.json config/accepted/amu-selfhost-native.yml --branch main
+plan expected/plan/real-clj-kondo-master.json config/accepted/real-clj-kondo.yml --branch master
+plan expected/plan/parameter-type-refused.json config/accepted/docs-logic.yml --param retries=many
+process expected/process/docs-reusable-config.yml config/accepted/docs-reusable-config.yml --param run-integration=true
+process expected/process/docs-matrix.yml config/accepted/docs-matrix.yml
+process expected/process/docs-expressions-main.yml config/accepted/docs-expressions.yml --branch main
+process expected/process/yaml-anchors.yml config/accepted/yaml-anchors.yml
+process expected/process/real-babashka-nbb.yml config/accepted/real-babashka-nbb.yml
+api expected/api/docs-workflow-filters-main.json config/accepted/docs-workflow-filters.yml --branch main --slug gh/example/project --number 42 --created-at 2026-10-23T07:00:00.000Z
+local expected/local/amu-selfhost-native.json config/accepted/amu-selfhost-native.yml --branch main
+
+# run records and JUnit reports
+runs expected/runs/api-v2-workflow-jobs.json runs/api-v2-workflow-jobs.json
+runs expected/runs/api-v2-workflows.json runs/api-v2-workflows.json
+runs expected/runs/kumitate-runs.json runs/kumitate-runs.json
+runs expected/runs/refused-status.json runs/refused-status.json
+runs-export expected/runs/kumitate-runs.circleci-items.json runs/kumitate-runs.json circleci-items
+runs-export expected/runs/kumitate-runs.kumitate.json runs/kumitate-runs.json kumitate
+runs expected/runs/roundtrip.json expected/runs/kumitate-runs.circleci-items.json
+junit expected/junit/run1-run2.json junit/run1.xml junit/run2.xml
+junit expected/junit/refused-doctype.json junit/refused-doctype.xml
+
+# MCP messages (the same handler the HTTP server answers with)
+mcp expected/mcp/initialize.json mcp/initialize.json
+mcp expected/mcp/initialized.json mcp/initialized.json
+mcp expected/mcp/tools-list.json mcp/tools-list.json
+mcp expected/mcp/call-plan.json mcp/call-plan.json
+mcp expected/mcp/call-api-shapes.json mcp/call-api-shapes.json
+mcp expected/mcp/call-validate-orbs.json mcp/call-validate-orbs.json
+mcp expected/mcp/call-junit.json mcp/call-junit.json
+mcp expected/mcp/call-runs-export.json mcp/call-runs-export.json
+mcp expected/mcp/call-bad-arguments.json mcp/call-bad-arguments.json
+mcp expected/mcp/unknown-method.json mcp/unknown-method.json

@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"plan/parameter-type","path":"parameters.retries","message":"`many` is not an integer"}],"warnings":[],"pipeline":{"parameters":{"deploy":false,"target":"staging"},"branch":null,"tag":null},"workflows":[]}

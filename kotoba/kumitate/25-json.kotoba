@@ -1,0 +1,128 @@
+;; 25-json (prefix js-): JSON text <-> Y. Numbers keep their text (kind 1),
+;; true/false too; strings are kind 2, null kind 0. Refused by name:
+;; json/unexpected, json/unterminated-string, json/bad-escape, json/bad-number,
+;; json/trailing-content, json/duplicate-key, json/too-deep (64 levels).
+
+(defn js-ws [s :string i :i64] :i64
+  (loop [k i] (if (and (< k (tx-len s)) (let [c (tx-cp s k)] (or (= c 32) (= c 9) (= c 10) (= c 13)))) (recur (+ k 1)) k)))
+(defn js-fail [code :string i :i64] [:ref :kumitate/FR] (->FR (y-null) i code))
+
+(defn js-number? [t :string] :bool
+  (let [n (tx-len t)
+        a (if (and (> n 0) (= (tx-cp t 0) 45)) 1 0)
+        ;; integer part
+        b (cond (>= a n) -1
+                (= (tx-cp t a) 48) (+ a 1)
+                (tx-digit? (tx-cp t a)) (loop [k a] (if (and (< k n) (tx-digit? (tx-cp t k))) (recur (+ k 1)) k))
+                :else -1)
+        c (cond (< b 0) -1
+                (and (< b n) (= (tx-cp t b) 46))
+                  (let [e (loop [k (+ b 1)] (if (and (< k n) (tx-digit? (tx-cp t k))) (recur (+ k 1)) k))]
+                    (if (= e (+ b 1)) -1 e))
+                :else b)
+        d (cond (< c 0) -1
+                (and (< c n) (or (= (tx-cp t c) 101) (= (tx-cp t c) 69)))
+                  (let [s0 (+ c 1) s1 (if (and (< s0 n) (or (= (tx-cp t s0) 43) (= (tx-cp t s0) 45))) (+ s0 1) s0)
+                        e (loop [k s1] (if (and (< k n) (tx-digit? (tx-cp t k))) (recur (+ k 1)) k))]
+                    (if (= e s1) -1 e))
+                :else c)]
+    (= d n)))
+
+(defn js-string [s :string a :i64] [:ref :kumitate/FR]
+  (loop [i (+ a 1) k (+ a 1) acc ""]
+    (if (>= i (tx-len s)) (js-fail "json/unterminated-string" a)
+      (let [c (tx-cp s i)]
+        (cond (= c 34) (->FR (y-str (tx-cat acc (tx-sub s k i))) (+ i 1) "")
+              (< c 32) (js-fail "json/unterminated-string" i)
+              (not (= c 92)) (recur (+ i (tx-w c)) k acc)
+              :else
+                (let [e (if (< (+ i 1) (tx-len s)) (tx-cp s (+ i 1)) 0)
+                      pre (tx-cat acc (tx-sub s k i))
+                      simple (cond (= e 34) "\"" (= e 92) "\\" (= e 47) "/" (= e 98) (tx-utf8 8) (= e 102) (tx-utf8 12)
+                                   (= e 110) "\n" (= e 114) "\r" (= e 116) "\t" :else "")]
+                  (cond (not (tx-empty? simple)) (recur (+ i 2) (+ i 2) (tx-cat pre simple))
+                        (= e 117)
+                          (let [u (js-hex4 s (+ i 2))]
+                            (cond (< u 0) (js-fail "json/bad-escape" i)
+                                  (and (>= u 55296) (<= u 56319))
+                                    (let [lo (if (and (< (+ i 7) (tx-len s)) (= (tx-cp s (+ i 6)) 92) (= (tx-cp s (+ i 7)) 117))
+                                               (js-hex4 s (+ i 8)) -1)]
+                                      (if (and (>= lo 56320) (<= lo 57343))
+                                        (recur (+ i 12) (+ i 12)
+                                               (tx-cat pre (tx-utf8 (+ 65536 (* (- u 55296) 1024) (- lo 56320)))))
+                                        (js-fail "json/bad-escape" i)))
+                                  (and (>= u 56320) (<= u 57343)) (js-fail "json/bad-escape" i)
+                                  :else (recur (+ i 6) (+ i 6) (tx-cat pre (tx-utf8 u)))))
+                        :else (js-fail "json/bad-escape" i))))))))
+(defn js-hex4 [s :string a :i64] :i64
+  (if (> (+ a 4) (tx-len s)) -1
+    (loop [j 0 v 0]
+      (cond (>= j 4) v
+            (< (tx-hex-val (tx-cp s (+ a j))) 0) -1
+            :else (recur (+ j 1) (+ (* v 16) (tx-hex-val (tx-cp s (+ a j)))))))))
+
+(defn js-value [s :string i0 :i64 depth :i64] [:ref :kumitate/FR]
+  (let [i (js-ws s i0) n (tx-len s)]
+    (cond (> depth 64) (js-fail "json/too-deep" i)
+          (>= i n) (js-fail "json/unexpected" i)
+          :else
+            (let [c (tx-cp s i)]
+              (cond (= c 123) (js-object s (+ i 1) depth)
+                    (= c 91) (js-array s (+ i 1) depth)
+                    (= c 34) (js-string s i)
+                    :else
+                      (let [e (loop [k i] (if (and (< k n) (let [d (tx-cp s k)] (or (tx-alpha? d) (tx-digit? d) (= d 45) (= d 43) (= d 46))))
+                                            (recur (+ k 1)) k))
+                            t (tx-sub s i e)]
+                        (cond (= e i) (js-fail "json/unexpected" i)
+                              (tx-eq t "null") (->FR (y-null) e "")
+                              (or (tx-eq t "true") (tx-eq t "false")) (->FR (y-plain t) e "")
+                              (js-number? t) (->FR (y-plain t) e "")
+                              :else (js-fail "json/bad-number" i))))))))
+(defn js-array [s :string i0 :i64 depth :i64] [:ref :kumitate/FR]
+  (let [k0 (js-ws s i0)]
+    (if (and (< k0 (tx-len s)) (= (tx-cp s k0) 93)) (->FR (y-seq) (+ k0 1) "")
+      (loop [i k0 acc (y-seq)]
+        (let [r (js-value s i (+ depth 1))]
+          (if (not (tx-empty? (:err r))) r
+            (let [k (js-ws s (:pos r))]
+              (cond (>= k (tx-len s)) (js-fail "json/unexpected" k)
+                    (= (tx-cp s k) 44) (recur (+ k 1) (y-add acc (:node r)))
+                    (= (tx-cp s k) 93) (->FR (y-add acc (:node r)) (+ k 1) "")
+                    :else (js-fail "json/unexpected" k)))))))))
+(defn js-object [s :string i0 :i64 depth :i64] [:ref :kumitate/FR]
+  (let [k0 (js-ws s i0)]
+    (if (and (< k0 (tx-len s)) (= (tx-cp s k0) 125)) (->FR (y-map) (+ k0 1) "")
+      (loop [i k0 acc (y-map)]
+        (let [k (js-ws s i)]
+          (if (or (>= k (tx-len s)) (not (= (tx-cp s k) 34))) (js-fail "json/unexpected" k)
+            (let [kr (js-string s k) key (:text (:node kr)) c (js-ws s (:pos kr))]
+              (cond (not (tx-empty? (:err kr))) kr
+                    (y-has? acc key) (js-fail "json/duplicate-key" k)
+                    (or (>= c (tx-len s)) (not (= (tx-cp s c) 58))) (js-fail "json/unexpected" c)
+                    :else
+                      (let [vr (js-value s (+ c 1) (+ depth 1))]
+                        (if (not (tx-empty? (:err vr))) vr
+                          (let [e (js-ws s (:pos vr))]
+                            (cond (>= e (tx-len s)) (js-fail "json/unexpected" e)
+                                  (= (tx-cp s e) 44) (recur (+ e 1) (y-put acc key (:node vr)))
+                                  (= (tx-cp s e) 125) (->FR (y-put acc key (:node vr)) (+ e 1) "")
+                                  :else (js-fail "json/unexpected" e)))))))))))))
+;; the whole text as one JSON value
+(defn js-parse [s :string] [:ref :kumitate/FR]
+  (let [r (js-value s 0 0)]
+    (cond (not (tx-empty? (:err r))) r
+          (< (js-ws s (:pos r)) (tx-len s)) (js-fail "json/trailing-content" (js-ws s (:pos r)))
+          :else r)))
+
+;; JSON text of y. A plain scalar that is true, false or a JSON number is
+;; written bare; every other scalar is a string.
+(defn js-write [y [:ref :kumitate/Y]] :string
+  (cond (= (:kind y) 0) "null"
+        (= (:kind y) 1) (if (or (y-bool? y) (js-number? (:text y))) (:text y) (tx-json-str (:text y)))
+        (= (:kind y) 2) (tx-json-str (:text y))
+        (= (:kind y) 4) (tx-cat3 "[" (tx-join (loop [i 0 acc (tx-strs)] (if (< i (y-n y)) (recur (+ i 1) (conj acc (js-write (y-at y i)))) acc)) ",") "]")
+        :else (tx-cat3 "{" (tx-join (loop [i 0 acc (tx-strs)]
+                                      (if (< i (y-n y))
+                                        (recur (+ i 1) (conj acc (tx-cat3 (tx-json-str (y-key y i)) ":" (js-write (y-at y i)))))
+                                        acc)) ",") "}")))

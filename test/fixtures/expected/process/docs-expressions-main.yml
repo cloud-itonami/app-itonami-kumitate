@@ -1,0 +1,63 @@
+version: 2
+jobs:
+  init-service:
+    docker:
+      - image: cimg/base:current
+    parallelism: 10
+    steps:
+      - run:
+          name: Print branch info
+          command: echo "Running on main"
+  test-service:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - run: make test
+  dry-run-service:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - run: make dry-run
+  publish-service:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - run: make publish
+  deploy-service:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - run: make deploy
+  storybook-tests:
+    docker:
+      - image: cimg/node:20.11
+    steps:
+      - run: npm run storybook-test
+workflows:
+  version: 2
+  deploy:
+    jobs:
+      - init-service
+      - test-service
+      - dry-run-service:
+          requires:
+            - init-service
+          filters: pipeline.git.branch != "main" and pipeline.git.branch != "canary"
+      - publish-service:
+          requires:
+            - init-service
+            - test-service
+          filters: pipeline.git.branch == "main" or pipeline.git.tag starts-with "release"
+      - deploy-service:
+          requires:
+            - publish-service
+          filters: pipeline.git.branch == "main" and pipeline.parameters.my-custom-param starts-with "DEPLOY:"
+          context:
+            - org-global
+      - storybook-tests:
+          requires:
+            - init-service
+          filters: |
+            pipeline.parameters.run-storybook-tests
+            or pipeline.git.branch == "dry-run-deploy"
+            or pipeline.git.branch starts-with "deploy"

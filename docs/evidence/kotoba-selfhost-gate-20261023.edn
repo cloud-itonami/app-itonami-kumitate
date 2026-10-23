@@ -1,0 +1,90 @@
+;; kumitate Kotoba selfhost gate receipt (Linear JUN-346). The README "Kotoba
+;; gate" commands, run as written on 2026-10-23 on this Mac's podman machine
+;; (applehv, arm64 Linux guest, kernel 6.15.10-200.fc42.aarch64); x86_64 runs
+;; under qemu-user in the same machine, where the image's seccomp filter is
+;; not installed (KEXE_SECCOMP=if-available). No Node.js, nbb, JVM, babashka,
+;; Python or C in the build or the gate; the container images supply only sh.
+;; Not part of CI: workspace CDCI is stopped.
+{:schema "kumitate.selfhost-gate.v1"
+ :date "2026-10-23"
+ :compiler {:repo "kotoba-lang/amu"
+            :commit "457042ab741520980bceb5bf12970937d1bc8dba"
+            :path "seed/bootstrap/aarch64-linux-static-root.elf"
+            :sha256 "1739f52f02fc90c28a1fa4a6c3a3f780caeff481893e3a1cd35badd8c227682e"}
+ :sources [
+           {:path "kotoba/kumitate/00-ns.kotoba" :sha256 "7a4f9766b97a5508257d34ebc31cc388612e43be2a9a59052759d56723d71384"}
+           {:path "kotoba/kumitate/10-text.kotoba" :sha256 "7b3ec830135646218bbcd6ef2957509b1b2754f08befc019891d474675308727"}
+           {:path "kotoba/kumitate/20-yaml.kotoba" :sha256 "399bef1fa2d7095ae74ce86793dd11645ff8d11886c90d28adcc15c2c31f6355"}
+           {:path "kotoba/kumitate/25-json.kotoba" :sha256 "3eedf60eccfa58971e6ea6618ac8a6300cdaaa74b3b78feaf95e232af4b643b8"}
+           {:path "kotoba/kumitate/26-emit.kotoba" :sha256 "1abd6f5f92c14036bb9c8f66d907b557ed84cddb2e4f3e47cf56f0902d29acdc"}
+           {:path "kotoba/kumitate/27-xml.kotoba" :sha256 "7352e97dba9701716ff59a933034ef97d4f4632146c78aab80115b387f93e72b"}
+           {:path "kotoba/kumitate/30-regex.kotoba" :sha256 "9dc4a30f0c71fda3f5126645253502d15cdaf88d87479c4081bc575abb69dd7a"}
+           {:path "kotoba/kumitate/35-expr.kotoba" :sha256 "30341364650069a5e946c4b19057bf29856774d24212b2faf77c17aaabdf7809"}
+           {:path "kotoba/kumitate/40-config.kotoba" :sha256 "6bd284ddab4b547c7b9b204b24df3c8fd4bda21c2d70f6fcaddc33920d577745"}
+           {:path "kotoba/kumitate/50-plan.kotoba" :sha256 "ce9f1fb7faa996e968c542c4d72830aff08cfb6e361f3c3fcf168a8247b380fa"}
+           {:path "kotoba/kumitate/55-out.kotoba" :sha256 "bd2705cc83ca8936eeeb31672cb42592158837ae5a43bbcdd9c586ed2897d2a9"}
+           {:path "kotoba/kumitate/60-api.kotoba" :sha256 "5d88ce2e1c67f7a425131fb9953a5d3f120277f47d9018d64354a0f6202ecbea"}
+           {:path "kotoba/kumitate/70-mcp.kotoba" :sha256 "0037d671cf6bdb1a81fa88c6aa83a728de667a17d35f3c2dd01ac348124cdbc6"}
+           {:path "kotoba/kumitate/80-http.kotoba" :sha256 "ec9d12dac237fd69058f4fb28da518da8a913da910cf1d55008710b6e866296d"}
+           {:path "kotoba/kumitate/90-cli.kotoba" :sha256 "5d9a8588cf3fe37e4ddb99192111cbc315fc1a36dba8594b607ee45e5f129320"}
+           {:path "kotoba/kumitate/99-main.kotoba" :sha256 "3d161d95318a74807f6106797ffb592c50f9f28ab5f3535fb3b7d320731599ea"}
+           {:path "kotoba/kumitate/tests/t-gate.kotoba" :sha256 "a8b557bc2e645e13d3bed554c231efee87fcaa751fc83c1d56cd8a82e078c938"}
+           {:path "kotoba/kumitate/tests/t-units.kotoba" :sha256 "724e11eccb9c4152ec6abe6192e08e92e7eb0b5ea7c34ec9af314b7914d73b08"}
+           {:path "kotoba/kumitate/MANIFEST" :sha256 "f57c2ba2c078182b51c600f02e2b85f4ff94966f0e1bd768d484e553cedd713a"}
+           {:path "kotoba/kumitate/GATE-MANIFEST" :sha256 "ef0bd7a16ef2b2c12a697ca867b97a1d6a9714962d0011737ecbbc65febcb5ba"}
+           {:path "test/fixtures/MANIFEST" :sha256 "8086cb4a08c5fea8eb0208f694b00ba5cadc58d686933628de96b661cb8cf816"} ]
+ :units {:command {:manifest "kotoba/kumitate/MANIFEST"
+                   :sha256 "0e7b24f034864b8b146257dba5bd92c3f061e890005fb2e2bf300c670065cbc8"}
+         :gate {:manifest "kotoba/kumitate/GATE-MANIFEST"
+                :sha256 "bb1f303528be8951aa64471f623549308c4ba39a7b43b840af4e493ab1da0f9c"}}
+ :images [{:name "kumitate-aarch64-linux.elf" :bytes 782848 :sha256 "c4e9382038ce346c4b17e1948494d3f6d7af3edc82ec0d8031944d279e234bda"}
+          {:name "kumitate-x86_64-linux.elf" :bytes 918016 :sha256 "c6a4187dfdf665a72c6bf301c72b4e5a6ffe2fe5a2d45d1754f8cbd125595963"}
+          {:name "gate-aarch64-linux.elf" :bytes 836096 :sha256 "2ca7ac2782f89fa6efc47613edfc0394fdd823964c80d2e682f3def06eb333a1"}
+          {:name "gate-x86_64-linux.elf" :bytes 967168 :sha256 "2e17d6784ce6f7e050dfd968fffcdae4858b677c5528c8cdf8ae6902839479f1"}]
+ :reproducible "two separate builds of the same units gave the same four image hashes"
+ :host {:runtime "podman --network none"
+        :arm64 {:platform "linux/arm64" :image "docker.io/library/python:3.12-alpine"
+                :image-digest "sha256:57f679a3910bed1eb16ad722b904a118bca8586ec8ad39d98dd13350e7062cb2"}
+        :x86_64 {:platform "linux/amd64 (qemu-user)" :image "docker.io/library/alpine:3"
+                 :image-digest "sha256:c26612752c78b18faacd63c7d50f4592c2e7b0f25e0e20e82bd74e465c57ab0d"
+                 :env "KEXE_SECCOMP=if-available"}}
+ :results {:gate {:aarch64-linux {:result 18 :expected 18} :x86_64-linux {:result 18 :expected 18}
+                  :tests ["yaml-scalars" "yaml-blocks" "yaml-collections" "yaml-anchors" "yaml-refusals" "emit-roundtrip"
+                          "json" "regex" "expr" "iso-uuid" "xml" "plan-matrix" "plan-refusals" "plan-filters"
+                          "plan-expand" "runs" "junit" "mcp"]}
+           :selftest {:aarch64-linux "SCANNED 75 PASS 75 FAIL 0" :x86_64-linux "SCANNED 75 PASS 75 FAIL 0"
+                      :configs {:accepted 13 :refused 23
+                                :real ["clj-kondo/clj-kondo" "borkdude/jet" "babashka/nbb" "mithril-lang/mithril-agent-runtime"
+                                       "apollographql/apollo-client" "babashka/babashka (refused: setup + continuation orb)"
+                                       "gatsbyjs/gatsby (refused: orbs)" "influxdata/telegraf (refused: orbs)"
+                                       "kotoba-lang/org-babashka-nbb (refused: no version, a 2.0 config)"]}}}
+ :negative-controls [{:mutation "50-plan pl-combo-is? never true (matrix exclude ignored)"
+                      :units {:command "a7881944bbde38dadfd185aace380f20ea878a8573cd8a011996f4b9f346ffeb"
+                              :gate "2e558c8e1e33f0a40ef7604fe8ed49ab833bad5296dd518a74dcbedee60237fc"}
+                      :gate 17 :selftest "SCANNED 75 PASS 71 FAIL 4"
+                      :failed ["plan-matrix" "plan docs-matrix" "process docs-matrix" "plan amu-selfhost-native" "local amu-selfhost-native"]}
+                     {:mutation "40-config: the orbs loop adds nothing (orbs.NAME not refused)"
+                      :units {:command "2d7f388c611f75fafc45a2db43746e95b383eb8a9e0c721cc27637d9c7d94a82"
+                              :gate "de9936b55ed5e39f1337668d85c1f7b963ccf7923741a97324f2587f1c0f485b"}
+                      :gate 18 :selftest "SCANNED 75 PASS 69 FAIL 6"
+                      :failed ["validate docs-orbs-matrix" "validate inline-orb" "validate real-babashka-setup-orb"
+                               "validate real-gatsby-orbs" "validate real-telegraf-orbs" "mcp call-validate-orbs"]
+                      :note "the unit gate still passes: its orb case is refused again at the step (config/orb-unresolved for node/install); the fixtures pin the orbs.NAME path"}]
+ :later-root {:commit "3aab6ce03bb5be09914d0acb75936db71511d2a9"
+              :sha256 "61ee2d3870612c7f8ed6bd2d25f40c8cc68b26d2b5b5336204b1ff2651fe60bb"
+              :aarch64-linux {:gate 18 :selftest "SCANNED 75 PASS 75 FAIL 0"}}
+ :mcp-http {:command "KEXE_ALLOW=37,38,39,43,44,46,47 KEXE_CAP_RESOURCES_43=0.0.0.0:8787 kumitate serve 0.0.0.0:8787 6 (podman -p 127.0.0.1:8787:8787)"
+            :curl ["POST initialize -> 200 result" "POST tools/call kumitate_plan -> 200 result" "GET /mcp -> 405"
+                   "POST with Origin http://evil.example -> 403" "POST notifications/initialized -> 202" "POST /other -> 404"]
+            :itonami-agent {:repo "kotoba-lang/itonami-agent" :commit "0c0557481041ddd78c723fd6dd0ed9fc9c7161a8"
+                            :client "src/itonami/agent/mcp_http_client.mjs"
+                            :client-sha256 "0116db5051612984994f4e53b2ac226258dbbf4ffb0f21d0f8ee8a789ad77122"
+                            :calls ["tools/list -> 8 tools" "tools/call kumitate_plan docs-matrix -> isError false, 3 levels"]
+                            :note "the agent's own HTTP client (run by node, the agent host); not part of kumitate's build or gate"}}
+ :yaml-cross-check {:reference "PyYAML SafeLoader (python:3.12-alpine, scratch only; not part of the gate)"
+                    :configs 14 :same 13
+                    :different {"influxdata/telegraf" "AZURE_EVENT_HUBS_EMULATOR_ACCEPT_EULA: yes -- YAML 1.1 reads true, kumitate (1.2 core schema) keeps the string"}}
+ :not-run ["a browser build: amu selfhost has no wasm32-browser target (kotoba-lang/amu#1515)"
+           "stdio MCP: the static runtime has no wire 41 :io/read (kotoba-lang/amu#1516)"
+           "x86_64 with the seccomp filter installed (only qemu-user here)"
+           "any connection to circleci.com or a VCS, or running a job (no consent broker)"]}
