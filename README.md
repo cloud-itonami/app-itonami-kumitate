@@ -36,8 +36,8 @@
 | `kotoba/kumitate/00-ns.kotoba` … `99-main.kotoba` | 本体。1 ファイル 1 module で、prefix で名前を分けます（下表）。 |
 | `kotoba/kumitate/MANIFEST` | native command `kumitate` の unit（ファイルをこの順に連結する）。 |
 | `kotoba/kumitate/GATE-MANIFEST` | test gate の unit（`99-main` を除く全 module と `tests/`）。 |
-| `kotoba/kumitate/tests/` | unit test（`test-*` 18 個）と gate の `main`。 |
-| `test/fixtures/` | fixture と期待出力。`MANIFEST` を `kumitate selftest` が読みます。 |
+| `kotoba/kumitate/tests/` | unit test（`test-*` 19 個）と gate の `main`。 |
+| `test/fixtures/` | fixture と期待出力。`MANIFEST` を `kumitate selftest` が読みます。`stdio/session.jsonl` は stdio の 1 session です。 |
 | `test/fixtures/config/SOURCES.edn` | 実在 config の出所（repo・commit・license・sha256）。 |
 | `aiueos/kumitate.edn` | aiueos アプリ記述子（`:effects #{}` の pure 判断コア）。 |
 | `aiueos/kumitate.wasm` | `MANIFEST` の unit を amu selfhost root が `wasm32-browser` にした module。`.provenance.edn`（root・unit・出力の hash）と `.publication.edn`（`:kotoba.output-set/v1` の印）が並びます。 |
@@ -56,7 +56,7 @@
 | 40-config | `cf-` | config の検証（名前付きの拒否） |
 | 50-plan / 55-out | `pl-` / `po-` | 展開後の計画、processed config、ローカル実行の手順 |
 | 60-api | `ap-` | API v2 の形、実行記録、JUnit 集計 |
-| 70-mcp / 80-http | `mc-` / `ht-` | MCP（pure な handler）と、native TCP 上の Streamable HTTP |
+| 70-mcp / 80-http / 85-stdio | `mc-` / `ht-` / `sd-` | MCP（pure な handler）、native TCP 上の Streamable HTTP、stdin／stdout の stdio |
 | 90-cli / 99-main | `cli-` | native command |
 
 ## 使い方
@@ -79,7 +79,35 @@ kumitate selftest /abs/test/fixtures/MANIFEST           # SCANNED n PASS p FAIL 
 
 ### MCP
 
-agent からは MCP の Streamable HTTP（JSON 応答、SSE なし）で使います。
+agent からは MCP で使います。transport は stdio と Streamable HTTP（JSON 応答、SSE なし）の 2 つです。
+
+- tool は 8 つです: `kumitate_validate`、`kumitate_plan`、`kumitate_process`、`kumitate_api_shapes`、`kumitate_local_plan`、`kumitate_runs`、`kumitate_runs_export`、`kumitate_junit`。どれも渡されたデータだけを読む pure な関数です。
+- どちらの transport でも、答えは同じ handler（`70-mcp` の `mc-handle`）が出します。
+
+#### stdio
+
+```sh
+KEXE_ALLOW=37,38,39,41 kumitate stdio
+```
+
+- 1 行が 1 つの JSON-RPC message です。答えは stdout に 1 行ずつ書き、通知には答えません。行末の CR は落とし、空行は読み飛ばします。end of file の前の、改行の無い最後の message にも答えます。stdout には答えしか書きません。
+- stdin は wire 41（`:io/read`）で読むので、`KEXE_ALLOW` に 41 が要ります。無いと最初の read で runtime が止めます。今の止まり方は `KEXE_TRAP {:kind :signal :signal :SIGILL}` で、どの wire かは出ません（amu の runtime の課題）。UTF-8 でない stdin も runtime が止めます。
+- 5 MiB を超える message には `-32600` を返し、その message の改行までを捨てて続けます。
+- 答えは 1 つずつ client に届きます。runtime は stdout を exit まで貯めますが、stderr に書く前には stdout を出します。それで答えを書くたびに、wire 39 に空の書き込みをします。
+- 1 つの答えの計算は `arena-scope` の中で動き、使ったものは答えの後に返ります。process に残るのは stdin から読んだ bytes だけです。string pool（256 MiB）が埋まると、runtime が `KEXE_TRAP {:kind :budget :reason :budget/bytes :arena :string-pool}` で止めます。
+  - 実測（1 process、aarch64-linux）では、`ping` 200,000 件、`tools/list` 20,000 件、16.5 KB の config の `kumitate_plan` 3,001 件に、すべて答えました。
+  - 1 MiB の message は、127 件に答えたところで止まりました。いくつもの read にまたがる message は、読んだ bytes とつないだ写しの 2 つが残るためです。
+- client が process を起こします。macOS では podman の arm64 VM の中で動かします。
+
+```json
+{"mcpServers": {"kumitate": {"command": "podman",
+  "args": ["run", "--rm", "-i", "--platform", "linux/arm64", "--network", "none", "-e", "KEXE_ALLOW=37,38,39,41",
+           "-v", "/abs/g:/abs/g:ro", "docker.io/library/python:3.12-alpine", "/abs/g/kumitate-aarch64-linux.elf", "stdio"]}}}
+```
+
+- 確かめた client は Claude Code の MCP client（2.1.309）です。上の設定で接続し、8 つの tool を一覧し、`kumitate_plan` を呼んで、答えの段（levels）を読みました（[記録](docs/evidence/kotoba-stdio-mcp-20261023.edn)）。itonami-agent の stdio client では、まだ試していません。
+
+#### Streamable HTTP
 
 ```sh
 KEXE_ALLOW=37,38,39,43,44,46,47 KEXE_CAP_RESOURCES_43=127.0.0.1:8787 kumitate serve 127.0.0.1:8787
@@ -87,8 +115,7 @@ KEXE_ALLOW=37,38,39,43,44,46,47 KEXE_CAP_RESOURCES_43=127.0.0.1:8787 kumitate se
 
 - 開けるのは `KEXE_CAP_RESOURCES_43` で許した 1 つの address だけです。
 - `POST /mcp` に答えます。GET／DELETE には 405、他の path には 404、localhost 以外の `Origin` には 403、5 MiB を超える body には 413 を返します。
-- tool は 8 つです: `kumitate_validate`、`kumitate_plan`、`kumitate_process`、`kumitate_api_shapes`、`kumitate_local_plan`、`kumitate_runs`、`kumitate_runs_export`、`kumitate_junit`。どれも渡されたデータだけを読む pure な関数です。
-- stdio の MCP はまだ作れません。static runtime に stdin（wire 41）が無いためです（kotoba-lang/amu#1516）。
+- 接続ごとの `arena-scope` はまだありません。答えるたびに使ったものが process に残るので、1 つの process が答えられる数には上限があります（数は測っていません）。
 - itonami-agent の profile では `mcp_servers: {kumitate: {url: "http://127.0.0.1:8787/mcp"}}` と書きます。
 
 ## Kotoba gate（amu selfhost だけ）
@@ -97,8 +124,8 @@ Node.js・nbb・JVM・babashka・C を使いません。各 MANIFEST のファ�
 
 ```sh
 AMU=../../kotoba-lang/amu; G=$(mktemp -d)     # G は podman が mount できる場所に置く
-git -C $AMU show 457042ab741520980bceb5bf12970937d1bc8dba:seed/bootstrap/aarch64-linux-static-root.elf > $G/root.elf
-chmod +x $G/root.elf                          # sha256 1739f52f02fc90c28a1fa4a6c3a3f780caeff481893e3a1cd35badd8c227682e
+git -C $AMU show 7239484e2cd1b3bbd9bc3095edb03fd986f8f6e5:seed/bootstrap/aarch64-linux-static-root.elf > $G/root.elf
+chmod +x $G/root.elf                          # sha256 bd0254759e442533ead3e190f361257725667ea252a83b3575a3fb0d65becb66
 for m in MANIFEST GATE-MANIFEST; do
   grep -v '^#' kotoba/kumitate/$m | while read p; do cat "$p"; echo; done > $G/$m.kotoba
 done
@@ -108,19 +135,33 @@ podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35=$
     ./root.elf compile MANIFEST.kotoba      --target $t --output kumitate-$t.elf --format static
     ./root.elf compile GATE-MANIFEST.kotoba --target $t --output gate-$t.elf     --format static
   done; chmod +x *.elf'
-# arm64 で: gate は 18 の PASS と :result 18、selftest は SCANNED 75 PASS 75 FAIL 0
+# arm64 で: gate は 19 の PASS と :result 19、selftest は SCANNED 75 PASS 75 FAIL 0
 podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35=$PWD -v $G:$G -v $PWD:$PWD -w $PWD \
   docker.io/library/python:3.12-alpine sh -c "KEXE_STRUCTURED_REPORT=1 $G/gate-aarch64-linux.elf; $G/kumitate-aarch64-linux.elf selftest $PWD/test/fixtures/MANIFEST"
 # x86_64 で（ここでは qemu-user なので seccomp は KEXE_SECCOMP=if-available で外れる）
 podman run --rm --platform linux/amd64 --network none -e KEXE_SECCOMP=if-available -e KEXE_CAP_RESOURCES_35=$PWD -v $G:$G -v $PWD:$PWD -w $PWD \
   docker.io/library/alpine:3 sh -c "KEXE_STRUCTURED_REPORT=1 $G/gate-x86_64-linux.elf; $G/kumitate-x86_64-linux.elf selftest $PWD/test/fixtures/MANIFEST"
+# stdio（arm64 で。x86_64 は image と platform を上の x86_64 の行と同じにする）:
+# 1 session の答えが期待出力と同じこと、答えが 1 つずつ届くこと
+podman run --rm -i --platform linux/arm64 --network none -v $G:$G -v $PWD:$PWD -w $PWD \
+  docker.io/library/python:3.12-alpine sh -s $G/kumitate-aarch64-linux.elf <<'EOF'
+KEXE_ALLOW=37,38,39,41 $1 stdio < test/fixtures/stdio/session.jsonl | cmp - test/fixtures/expected/stdio/session.jsonl && echo "session: same"
+d=$(mktemp -d); mkfifo $d/in $d/out
+KEXE_ALLOW=37,38,39,41 $1 stdio < $d/in > $d/out & exec 3> $d/in 4< $d/out
+for m in '{"jsonrpc":"2.0","id":1,"method":"ping"}' '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; do
+  printf '%s\n' "$m" >&3; case $m in *'"id"'*) if read -t 5 -r a <&4; then echo "answer ${#a} bytes"; else echo "no answer in 5 s"; fi;; esac
+done
+exec 3>&-; wait $!; echo "exit $?"
+EOF
 ```
 
-- 期待値: どちらの target でも gate は 18／18、selftest は SCANNED 75 PASS 75 FAIL 0。
+- 期待値: どちらの target でも gate は 19／19、selftest は SCANNED 75 PASS 75 FAIL 0。stdio は `session: same`、`answer 36 bytes`、`answer 6428 bytes`、`exit 0`。
 - 負の対照:
   - matrix の exclude を無視させた写しでは、gate が 17、selftest が FAIL 4 になります。
   - orbs の拒否を外した写しでは、selftest が FAIL 6 になります。
-- 実測の記録は [`docs/evidence/kotoba-selfhost-gate-20261023.edn`](docs/evidence/kotoba-selfhost-gate-20261023.edn) にあります。
+  - stdio で答えごとの wire 39 の書き込みを外した写しでは、5 秒待っても答えが届きません。答えは end of file の後にまとめて出ます。
+  - stdio の `arena-scope` を外した写しは、`ping` 66,565 件、`tools/list` 1,273 件、16.5 KB の `kumitate_plan` 219 件で、runtime の budget／arena の trap で止まります。
+- 実測の記録は [`docs/evidence/kotoba-stdio-mcp-20261023.edn`](docs/evidence/kotoba-stdio-mcp-20261023.edn)（今の root と stdio）と [`docs/evidence/kotoba-selfhost-gate-20261023.edn`](docs/evidence/kotoba-selfhost-gate-20261023.edn)（最初の slice、root 1739f52f…）にあります。
 - CI には入れていません。workspace の CDCI は停止中で、再開は owner が決めます。
 
 ## ブラウザ（wasm32-browser）
@@ -154,6 +195,7 @@ wasm の gate と fixture selftest を headless Chromium で動かし、native �
 ```sh
 # G に root.elf がある（上の build）。chromium の入った arm64 Linux の image を使う
 #（例: python:3.12-alpine に apk add chromium をして commit したもの。apk にだけ network が要る）
+AMU=$(cd $AMU && pwd)                         # podman の -v は絶対 path だけを受ける
 grep -v '^#' kotoba/kumitate/GATE-MANIFEST | while read p; do cat "$p"; echo; done > $G/GATE-MANIFEST.kotoba
 podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35=$G -v $G:$G -v $PWD:$PWD -v $AMU:$AMU -w $PWD IMAGE sh -c "
   $G/root.elf compile $G/GATE-MANIFEST.kotoba --target wasm32-browser --output $G/gate.wasm
@@ -163,7 +205,7 @@ podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35=$
   tail -1 $G/b-self/output"
 ```
 
-- 期待値: gate は `:result 18`、selftest は `SCANNED 75 PASS 75 FAIL 0`。
+- 期待値: gate は `:result 19`、selftest は `SCANNED 75 PASS 75 FAIL 0`。
 - 出力（`$G/b-gate/output`、`$G/b-self/output`）は、native の aarch64-linux static image の stdout とバイト単位で同じです（上の「Kotoba gate」）。残り fuel も同じです。
 - 画面そのものの確かめ（例を読んで計画と DAG、拒否される config、実行記録と JUnit、`fetch` が CSP で拒否されること）の記録は [`docs/evidence/kotoba-wasm32-browser-20261023.edn`](docs/evidence/kotoba-wasm32-browser-20261023.edn) にあります。
 - CI には入れていません（上の「Kotoba gate」と同じ理由）。

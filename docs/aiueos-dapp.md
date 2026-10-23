@@ -18,12 +18,12 @@ kumitate を「サーバに何も置かない dapp」として作ります。
 
 | 層 | 実体 | 状態 |
 |---|---|---|
-| 判断コア（pure） | `kotoba/kumitate/10-text` … `70-mcp`。YAML／JSON／XML、regex、expression、検証、展開、API v2、集計、MCP の handler。`:effects #{}` | **実装済み・実測**（gate 18/18、selftest 75/75、aarch64-linux と x86_64-linux） |
+| 判断コア（pure） | `kotoba/kumitate/10-text` … `70-mcp`。YAML／JSON／XML、regex、expression、検証、展開、API v2、集計、MCP の handler。`:effects #{}` | **実装済み・実測**（gate 19/19、selftest 75/75、aarch64-linux と x86_64-linux） |
 | アプリ記述子 | `aiueos/kumitate.edn`（`:aiueos/kind :app`、imports なし、`:aiueos/wasm "kumitate.wasm"`） | **実装済み**。aiueos の session／grant への配線は未実装 |
-| wasm の産物 | `aiueos/kumitate.wasm`（`MANIFEST` の unit、amu selfhost root の `wasm32-browser`）と provenance・publication の記録 | **実装済み・実測**（headless Chromium で gate 18、selftest 75/75。native と出力がバイト単位で同じ） |
-| native command | `90-cli`。`validate` `plan` `process` `api` `local` `runs` `runs-export` `junit` `mcp` `selftest` | **実装済み・実測** |
+| wasm の産物 | `aiueos/kumitate.wasm`（`MANIFEST` の unit、amu selfhost root の `wasm32-browser`）と provenance・publication の記録 | **実装済み・実測**（headless Chromium で gate 19、selftest 75/75。native と出力がバイト単位で同じ） |
+| native command | `90-cli`。`validate` `plan` `process` `api` `local` `runs` `runs-export` `junit` `mcp` `serve` `stdio` `selftest` | **実装済み・実測** |
 | agent 統合（MCP） | `80-http`。native TCP（wire 43–47）の上の Streamable HTTP（JSON 応答）。tool は 8 つ | **実装済み・実測**（curl、itonami-agent の HTTP client） |
-| stdio MCP | static runtime に stdin（wire 41）が無い | **ブロック**（kotoba-lang/amu#1516） |
+| stdio MCP | `85-stdio`。stdin（wire 41）の 1 行 1 message、答えごとに flush と `arena-scope`。tool は 8 つ | **実装済み・実測**（期待出力との一致、1 つずつ届くこと、Claude Code の MCP client。itonami-agent の stdio client は未試験） |
 | ブラウザの画面 | `web/`。config を貼る／開く、検証、計画、DAG、processed config、実行記録と JUnit の集計。Worker の中の `kumitate.wasm` が計算する。CSP `connect-src 'none'` | **実装済み・実測**（headless Chromium。公開は未着地、下記） |
 | ローカル実行 | `local` が job ごとの手順を出す。実行はしない | 手順だけ実装。実行は**未実装・ブロック**（下記） |
 | 本家 API・VCS への接続 | circleci.com、GitHub 等 | **未実装・ブロック**（同意 broker が無い） |
@@ -104,7 +104,9 @@ workspace の「Kotoba end-user apps run in the user's environment」契約に�
 
 ## 未実装の境界
 
-- **stdio の MCP**: static runtime に wire 41 が無いため作れません（kotoba-lang/amu#1516）。今は HTTP で代わりをしています。
+- **stdio の MCP の残り**:
+  - wire 41 を許していない image は、最初の read で runtime の SIGILL の trap で止まります。どの wire かは出ません（amu の runtime の課題）。
+  - 1 つの process は、stdin から読んだ bytes を string pool（256 MiB）に持ち続けます。埋まると runtime の budget の trap で止まるので、client が起こし直します。
 - **ローカル実行・本家接続**:
   - job の実行（利用者のマシン、または browser Worker）、circleci.com の API v2、VCS は、共有の `kotoba.app.client-runtime.v1` 記述子と、操作ごとの同意が要ります。
   - その broker（`kotoba-lang/wasm-webcomponent/src/kotoba-client-runtime.js`）は、2026-10-23 の時点で存在しません（GitHub API で 404）。

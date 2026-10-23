@@ -10,6 +10,7 @@
 ;;   kumitate junit REPORT.xml..
 ;;   kumitate mcp REQUEST.json          one JSON-RPC message -> its answer
 ;;   kumitate serve IP:PORT [LIMIT]     MCP over HTTP (needs the :net grant)
+;;   kumitate stdio                     MCP over stdin/stdout (needs wire 41)
 ;;   kumitate selftest MANIFEST         the fixtures: SCANNED n PASS p FAIL f
 ;;
 ;; The result is 0 when the input is accepted, 1 when it is refused, 2 for a
@@ -32,7 +33,7 @@
 
 (defrecord CO [text :string code :i64])
 (defn cli-usage [] [:ref :kumitate/CO]
-  (->CO "usage: kumitate validate|plan|process|api|local CONFIG [--branch B] [--tag T] [--param K=V].. [--value K=V]..\n       kumitate runs FILE | runs-export FILE FORMAT | junit XML.. | mcp REQUEST | serve IP:PORT [N] | selftest MANIFEST\n" 2))
+  (->CO "usage: kumitate validate|plan|process|api|local CONFIG [--branch B] [--tag T] [--param K=V].. [--value K=V]..\n       kumitate runs FILE | runs-export FILE FORMAT | junit XML.. | mcp REQUEST | serve IP:PORT [N] | stdio | selftest MANIFEST\n" 2))
 (defn cli-json [y [:ref :kumitate/Y]] [:ref :kumitate/CO]
   (->CO (tx-cat (js-write y) "\n") (if (y-false? (y-get y "valid")) 1 0)))
 
@@ -116,6 +117,7 @@
 (defn cli-main [] :i64
   (let [args (cli-args) n (count args) cmd (if (> n 0) (nth args 0) "")]
     (cond (and (tx-eq cmd "serve") (> n 1)) (let [s (ht-serve (nth args 1) (if (and (> n 2) (tx-int? (nth args 2))) (tx-int (nth args 2)) 0))] 0)
+          (tx-eq cmd "stdio") (let [s (sd-serve)] 0)
           (and (tx-eq cmd "selftest") (> n 1)) (if (cli-readable? (nth args 1)) (cli-selftest (nth args 1)) (let [z (cli-out (:text (cli-missing (nth args 1))))] 3))
           (tx-eq cmd "version") (cli-out (tx-cat3 "kumitate " (mc-version) "\n"))
           :else (let [o (cli-run args) z (if (= (:code o) 2) (cli-err (:text o)) (cli-out (:text o)))] (:code o)))))

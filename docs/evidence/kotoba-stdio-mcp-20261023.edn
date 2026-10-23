@@ -1,0 +1,119 @@
+;; kumitate stdio MCP receipt (Linear JUN-354, JUN-346). The README "Kotoba
+;; gate" block, run as written on 2026-10-23 on this Mac's podman machine
+;; (applehv, arm64 Linux guest, kernel 6.15.10-200.fc42.aarch64), from a fresh
+;; copy of the tree; x86_64 runs under qemu-user in the same machine, where the
+;; image's seccomp filter is not installed (KEXE_SECCOMP=if-available). No
+;; Node.js, nbb, JVM, babashka, Python or C in the build or the gate; the
+;; container images supply only sh. Python on the host only generated the
+;; load inputs below; it is not in the build or the gate. Not part of CI:
+;; workspace CDCI is stopped.
+{:schema "kumitate.selfhost-gate.v1"
+ :date "2026-10-23"
+ :compiler {:repo "kotoba-lang/amu"
+            :commit "7239484e2cd1b3bbd9bc3095edb03fd986f8f6e5"
+            :path "seed/bootstrap/aarch64-linux-static-root.elf"
+            :sha256 "bd0254759e442533ead3e190f361257725667ea252a83b3575a3fb0d65becb66"
+            :why "the root on main (also at 3b88263e) and the browser build's root; its static runtimes answer wire 41 :io/read (amu #1525)"
+            :also {:commit "51b89255ef674a2da8bfbe650c971f1b08c0e3d3"
+                   :sha256 "88afda8977285f3839ebad1cb785a344b296c6890f3f901746259dd478ab9fb7"
+                   :note "the stdio runs below were first made with this root; seed/76 and seed/77 are the same at both commits, and both roots give the same four images"}}
+ :sources [
+           {:path "kotoba/kumitate/00-ns.kotoba" :sha256 "7a4f9766b97a5508257d34ebc31cc388612e43be2a9a59052759d56723d71384"}
+           {:path "kotoba/kumitate/10-text.kotoba" :sha256 "7b3ec830135646218bbcd6ef2957509b1b2754f08befc019891d474675308727"}
+           {:path "kotoba/kumitate/20-yaml.kotoba" :sha256 "399bef1fa2d7095ae74ce86793dd11645ff8d11886c90d28adcc15c2c31f6355"}
+           {:path "kotoba/kumitate/25-json.kotoba" :sha256 "3eedf60eccfa58971e6ea6618ac8a6300cdaaa74b3b78feaf95e232af4b643b8"}
+           {:path "kotoba/kumitate/26-emit.kotoba" :sha256 "1abd6f5f92c14036bb9c8f66d907b557ed84cddb2e4f3e47cf56f0902d29acdc"}
+           {:path "kotoba/kumitate/27-xml.kotoba" :sha256 "7352e97dba9701716ff59a933034ef97d4f4632146c78aab80115b387f93e72b"}
+           {:path "kotoba/kumitate/30-regex.kotoba" :sha256 "9dc4a30f0c71fda3f5126645253502d15cdaf88d87479c4081bc575abb69dd7a"}
+           {:path "kotoba/kumitate/35-expr.kotoba" :sha256 "30341364650069a5e946c4b19057bf29856774d24212b2faf77c17aaabdf7809"}
+           {:path "kotoba/kumitate/40-config.kotoba" :sha256 "6bd284ddab4b547c7b9b204b24df3c8fd4bda21c2d70f6fcaddc33920d577745"}
+           {:path "kotoba/kumitate/50-plan.kotoba" :sha256 "ce9f1fb7faa996e968c542c4d72830aff08cfb6e361f3c3fcf168a8247b380fa"}
+           {:path "kotoba/kumitate/55-out.kotoba" :sha256 "bd2705cc83ca8936eeeb31672cb42592158837ae5a43bbcdd9c586ed2897d2a9"}
+           {:path "kotoba/kumitate/60-api.kotoba" :sha256 "5d88ce2e1c67f7a425131fb9953a5d3f120277f47d9018d64354a0f6202ecbea"}
+           {:path "kotoba/kumitate/70-mcp.kotoba" :sha256 "0037d671cf6bdb1a81fa88c6aa83a728de667a17d35f3c2dd01ac348124cdbc6"}
+           {:path "kotoba/kumitate/80-http.kotoba" :sha256 "ec9d12dac237fd69058f4fb28da518da8a913da910cf1d55008710b6e866296d"}
+           {:path "kotoba/kumitate/85-stdio.kotoba" :sha256 "cd0abef1280c2172a8cd24b74cb19ae38bcc9d11eaa267b50771ab4d4975805e"}
+           {:path "kotoba/kumitate/90-cli.kotoba" :sha256 "684cb6a7a30b49d58b1014aefcabfbb29831af6872495e4f3eeb53574ef7fc99"}
+           {:path "kotoba/kumitate/99-main.kotoba" :sha256 "3d161d95318a74807f6106797ffb592c50f9f28ab5f3535fb3b7d320731599ea"}
+           {:path "kotoba/kumitate/tests/t-gate.kotoba" :sha256 "2f38d71bcfa56759d43819ce125664cf39123973742c2ab8b066dc6876ed078a"}
+           {:path "kotoba/kumitate/tests/t-units.kotoba" :sha256 "1d91f94ea3fe4cc5b2e2d9f16047f6727ae7e470c9fe60bb561ad07e4f348e55"}
+           {:path "kotoba/kumitate/MANIFEST" :sha256 "f48b769992df6d6d0b3c690dfb16aa483c8117fc6597aa8037404ee6e8f671a1"}
+           {:path "kotoba/kumitate/GATE-MANIFEST" :sha256 "9a8e53c785d64a24f856af1d4c15d81669f1c58a1cfc754cc0d65857f97a14e0"}
+           {:path "test/fixtures/MANIFEST" :sha256 "8086cb4a08c5fea8eb0208f694b00ba5cadc58d686933628de96b661cb8cf816"}
+           {:path "test/fixtures/stdio/session.jsonl" :sha256 "f4f6040d2bd5f185163b554e4531ee743e6cb2a6a7dddb7fecb1548adada1563"}
+           {:path "test/fixtures/expected/stdio/session.jsonl" :sha256 "5a122de208ed9d245e108f43198de55c3b6d0cd4d9f6a03195775c1f664e2a1a"} ]
+ :units {:command {:manifest "kotoba/kumitate/MANIFEST"
+                   :sha256 "fbc45d41441c5de33a935e4f82746fdb08412f7493695d32da557d0bb3ab3165"}
+         :gate {:manifest "kotoba/kumitate/GATE-MANIFEST"
+                :sha256 "bb220dcb1630c9d309289b0ec4078c0f04d537cad2689c342032c881b643f899"}}
+ :images [{:name "kumitate-aarch64-linux.elf" :bytes 811520 :sha256 "d271ce8c0147419208a9e27350cbda1c36290d150916027efa0532e73c4ee8c5"}
+          {:name "kumitate-x86_64-linux.elf" :bytes 954880 :sha256 "9137afeea2e1592d319105d59bb5852d208ef567b95b2788507689d7db0f9b23"}
+          {:name "gate-aarch64-linux.elf" :bytes 864768 :sha256 "14fc0672141cda0e57105cc8ff292d4c90df8bff5733db239b2ee1b6daa1bae5"}
+          {:name "gate-x86_64-linux.elf" :bytes 1004032 :sha256 "0b308ac8710a06b5582098e95cffae524c7e628812464501be33dcd81afaafb8"}]
+ :reproducible "five builds of the same units gave the same four image hashes: two by hand and two by the README block with root 88afda89, one by hand and one by the README block with root bd025475"
+ :host {:runtime "podman --network none"
+        :arm64 {:platform "linux/arm64" :image "docker.io/library/python:3.12-alpine"
+                :image-digest "sha256:57f679a3910bed1eb16ad722b904a118bca8586ec8ad39d98dd13350e7062cb2"}
+        :x86_64 {:platform "linux/amd64 (qemu-user)" :image "docker.io/library/alpine:3"
+                 :image-digest "sha256:c26612752c78b18faacd63c7d50f4592c2e7b0f25e0e20e82bd74e465c57ab0d"
+                 :env "KEXE_SECCOMP=if-available"}}
+ :results {:gate {:aarch64-linux {:result 19 :expected 19} :x86_64-linux {:result 19 :expected 19}
+                  :tests ["yaml-scalars" "yaml-blocks" "yaml-collections" "yaml-anchors" "yaml-refusals" "emit-roundtrip"
+                          "json" "regex" "expr" "iso-uuid" "xml" "plan-matrix" "plan-refusals" "plan-filters"
+                          "plan-expand" "runs" "junit" "mcp" "stdio"]}
+           :selftest {:aarch64-linux "SCANNED 75 PASS 75 FAIL 0" :x86_64-linux "SCANNED 75 PASS 75 FAIL 0"}
+           :stdio {:command "KEXE_ALLOW=37,38,39,41 kumitate stdio"
+                   :session {:input "test/fixtures/stdio/session.jsonl"
+                             :expected "test/fixtures/expected/stdio/session.jsonl"
+                             :shape "the 10 MCP fixture messages, one a line, with a blank line, a CRLF ending and no newline after the last; the expected file is the 9 non-empty answers of the mcp fixtures (expected/mcp/*.json) in the same order, so stdio and the one-message mcp command answer the same bytes"
+                             :aarch64-linux "same (cmp), exit 0, stderr empty" :x86_64-linux "same (cmp), exit 0, stderr empty"}
+                   :turns {:how "the server reads a FIFO the client keeps open; the client sends one request and waits at most 5 s for its answer before the next"
+                           :aarch64-linux ["initialize answered" "kumitate_plan answered" "ping answered" "exit 0 at end of file, nothing more on stdout"]
+                           :x86_64-linux ["initialize answered" "kumitate_plan answered" "ping answered" "exit 0 at end of file, nothing more on stdout"]
+                           :readme-block ["session: same" "answer 36 bytes" "answer 6428 bytes" "exit 0"]}
+                   :limits {:oversized "a 5242890-byte message between two pings: -32600 (a message over 5242880 bytes), then both pings and a 4016123-byte kumitate_validate answered, exit 0"
+                            :without-wire-41 "KEXE_ALLOW=37,38,39: KEXE_TRAP {:kind :signal :signal :SIGILL}, exit 120, at the first read (the runtime refuses an ungranted wire without naming it)"}
+                   :capacity {:host "aarch64-linux, one process each"
+                              :answered [{:calls "ping" :n 200000 :all true :seconds 45}
+                                         {:calls "tools/list" :n 20000 :all true :seconds 90}
+                                         {:calls "kumitate_plan, a 167-byte config" :n 40000 :all true :seconds 88}
+                                         {:calls "kumitate_plan, real-clj-kondo.yml (16510 bytes)" :n 3000 :all true :seconds 128}]
+                              :stopped {:calls "ping with a 1 MiB params.pad" :answered 127 :of 300
+                                        :trap "KEXE_TRAP {:kind :budget :reason :budget/bytes :arena :string-pool}"
+                                        :why "the bytes read stay in the 256 MiB string pool; a message over several 64 KiB reads also keeps its joined copy"}}
+                   :client {:name "Claude Code" :version "2.1.309" :mode "claude -p --strict-mcp-config --mcp-config (podman run -i ... kumitate-aarch64-linux.elf stdio)"
+                            :seen ["mcp_servers kumitate: connected" "8 tools listed as mcp__kumitate__*" "tools/call kumitate_plan with branch main and a two-job config"
+                                   "the answer's levels [[\"a\"],[\"b\"]] read back by the model"]
+                            :not-tried "the itonami-agent stdio client (src/itonami/agent/mcp.cljk, on nbb)"}}}
+ :browser {:build "README \"ブラウザの build\" with C=7239484e2cd1b3bbd9bc3095edb03fd986f8f6e5 (scripts/browser-build.sh)"
+           :compile-result "{:ok true, :target :wasm32-browser, :format :wasm, :functions 525, :pool-bytes 26936, :bytes 313113}"
+           :files [{:name "aiueos/kumitate.wasm" :sha256 "5ed9d1b89555c8e1f01631fef00161aa59fc0202b4c9178eaebfeaefcfbac764"}
+                   {:name "aiueos/kumitate.wasm.provenance.edn" :sha256 "997ce4f8b29342517360c159f176df8a18583c8476b3f1ebf42963d7affd877d"}
+                   {:name "aiueos/kumitate.wasm.publication.edn" :sha256 "01ab47859a577f89d78eb92888255c7230c85e7b953402b2feee32679ba769dc"}
+                   {:name "web/kumitate.wasm.js" :sha256 "297fe16b8efca73faad0f02d6cbff2980da75aed4496eed2ade8b8859be6dd77"}
+                   {:name "web/kotoba-host.js" :sha256 "b63e006e48133a1da5453600bbed5e9e37bbe3955af64c79d27e173275b912e4" :changed false}]
+           :gate {:how "README \"ブラウザの gate\", amu's scripts/seed/check-wasm32-browser.py from 7239484e, Alpine chromium in python:3.12-alpine (apk the only step with network)"
+                  :browser "Chrome/155.0.8059.84 (headless, arm64)"
+                  :gate {:report "{:status :ok :result 19 ...}" :remaining-fuel 9007199254557205
+                         :output-sha256 "09e103c72d0b025a601a7d89a1ad7bba39e0d5b28f0a009caf3586fe61925d0a"}
+                  :selftest {:report "{:status :ok :result 0 ...}" :last-line "SCANNED 75 PASS 75 FAIL 0" :remaining-fuel 9007199252721879
+                             :output-sha256 "8a173e83c42a7422aac39d10ba60f3f9f51992ac793cade5c10d9d302de758f2"}
+                  :equal "both outputs = the native aarch64-linux image's stdout (without KEXE_STRUCTURED_REPORT's last line), byte for byte, with the same remaining fuel"}
+           :not-checked ["the page itself was not walked through again: web/ is unchanged and the module answers the same five commands byte for byte"
+                         ":memory-pages 4615 in aiueos/kumitate.edn was not measured again"]
+           :stdio {:args ["stdio"] :allow-tried ["37,38,39" "37,38,39,41"]
+                   :stderr "KEXE_CAP {:wire 41 :refused :wasm32-browser}\nKEXE_TRAP {:kind :signal :signal :SIGILL}\n" :exit 120
+                   :note "the browser host refuses wire 41 by name even when it is listed, so the stdio command is native only"}}
+ :negative-controls [{:mutation "85-stdio sd-send: no empty wire 39 write after an answer"
+                      :unit "f124d1cd9f6bd2ca56811f6ec857d110624cce5e2b4d13c7b3698889fdf132f7"
+                      :turns ["no answer within 5 s" "no answer within 5 s" "no answer within 5 s"]
+                      :end-of-file "exit 0, then all 1251 bytes of the three answers at once"}
+                     {:mutation "85-stdio sd-answer-all: no arena-scope around an answer"
+                      :unit "7309762cb6d7fbbad1bcd949327b8a3c0d7a1d6513d9d0d1ecf8d8bcc2c0ad2f"
+                      :stopped [{:calls "ping" :answered 66565 :of 200000 :trap "KEXE_TRAP {:kind :budget :reason :budget/cells :arena :pairs}"}
+                                {:calls "tools/list" :answered 1273 :of 20000 :trap "KEXE_TRAP {:kind :budget :reason :budget/bytes :arena :string-pool}"}
+                                {:calls "kumitate_plan, a 167-byte config" :answered 2193 :of 40000 :trap "KEXE_TRAP {:kind :budget :reason :budget/cells :arena :pairs}"}
+                                {:calls "kumitate_plan, real-clj-kondo.yml" :answered 219 :of 3000 :trap "KEXE_TRAP {:kind :arena :reason :vector-table-exhausted}"}]}]
+ :not-done ["the runtime names no wire when it refuses an ungranted one (SIGILL); that is amu's, not kumitate's"
+            "kumitate serve has no arena-scope per connection; its capacity is not measured"
+            "x86_64 runs only under qemu-user here, without the image's seccomp filter; no physical x86_64 host was used"]}
