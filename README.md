@@ -7,6 +7,7 @@
   - パラメータの代入、executor と command の展開、`when`／`unless`、matrix の展開、branch／tag の filter と expression の filter、`requires` の DAG、段（level）ごとの並列度を扱います。
 - CircleCI API v2 の Pipeline／Workflow／Job の形で書き出します。
 - 利用者が持っている実行記録（API v2 の items、kumitate.runs.v1）と JUnit XML を読み、失敗・不安定・遅いものを集計します。
+- ブラウザの画面（`web/`）でも同じ計算をします。同じ Kotoba の command を amu selfhost が wasm にしたものを、ブラウザの Worker で動かします。外部通信はゼロです。
 
 書き方は **Kotoba だけ**です。ビルドとテストには amu selfhost の root compiler だけを使います。scittle・CLJS・kbb・nbb・Node・JVM・C は使いません。orbs と CircleCI functions は取得しません。CircleCI と VCS には接続しません。
 
@@ -39,6 +40,9 @@
 | `test/fixtures/` | fixture と期待出力。`MANIFEST` を `kumitate selftest` が読みます。 |
 | `test/fixtures/config/SOURCES.edn` | 実在 config の出所（repo・commit・license・sha256）。 |
 | `aiueos/kumitate.edn` | aiueos アプリ記述子（`:effects #{}` の pure 判断コア）。 |
+| `aiueos/kumitate.wasm` | `MANIFEST` の unit を amu selfhost root が `wasm32-browser` にした module。`.provenance.edn`（root・unit・出力の hash）と `.publication.edn`（`:kotoba.output-set/v1` の印）が並びます。 |
+| `web/` | ブラウザの画面。静的な HTML・CSS・JS だけで、計算はしません（下の「ブラウザ」）。 |
+| `scripts/browser-build.sh` | `aiueos/kumitate.wasm` とその記録、`web/kumitate.wasm.js`、`web/kotoba-host.js` を作る POSIX sh。 |
 | `docs/aiueos-dapp.md` | 設計、未実装の境界、ブロッカー。 |
 | `docs/evidence/` | 実測の記録（compiler・入力・出力の hash、結果、負の対照）。 |
 
@@ -117,13 +121,57 @@ podman run --rm --platform linux/amd64 --network none -e KEXE_SECCOMP=if-availab
   - matrix の exclude を無視させた写しでは、gate が 17、selftest が FAIL 4 になります。
   - orbs の拒否を外した写しでは、selftest が FAIL 6 になります。
 - 実測の記録は [`docs/evidence/kotoba-selfhost-gate-20261023.edn`](docs/evidence/kotoba-selfhost-gate-20261023.edn) にあります。
-- CI には入れていません。workspace の CDCI は停止中で、再開は owner が決めます。新しい shell tooling も足していません。
+- CI には入れていません。workspace の CDCI は停止中で、再開は owner が決めます。
+
+## ブラウザ（wasm32-browser）
+
+`web/index.html` を開くと、config.yml を貼るかファイルで開いて、検証の結果（名前付きの拒否）、展開後の計画、workflow の DAG、`config process` の形の YAML を見られます。実行記録（JSON）と JUnit XML を開くと、その集計を出します。
+
+- **計算は kumitate.wasm だけ**がします。中身は native の `kumitate` command と同じ unit（`MANIFEST`）で、`validate` `plan` `process` `runs` `junit` をそのまま呼びます。`web/app.js` は入出力を運んで描くだけです。
+- **実行はブラウザの Worker** です（`web/kotoba-host.js`、amu の `runtime/wasm32-browser-static-host.js` の写し）。app の origin は静的なファイルを配るだけで、ロジックも API も持ちません。
+- **外部通信はゼロ**です。ページの CSP は `connect-src 'none'` で、module もスクリプトとして読みます（`web/kumitate.wasm.js`、読み込み時に sha256 を照合します）。貼ったものや開いたファイルは、このページのメモリにしかありません。保存もしません。
+- **module に渡すのは、その実行の入出力だけ**です（amu の entry ABI、`seed/README.md`）。ページが許すのは wire 37／39（stdout・stderr）、38（引数）、35（ページが渡したファイルの読み取りだけ）です。`kotoba:host/cap` は、他のすべての capability を名前付きで拒否します。CircleCI や VCS への接続は、共有の同意 broker（JUN-353 Phase 2）が着地するまで、作りもしません。
+- 1 回の実行は 1 つの Worker です。30 秒で止めます。arena は start で約 288 MiB（4615 page）を確保します。
+
+### ブラウザの build
+
+Node・Python・JVM・C を使いません。root と Worker host は、amu の 1 つの commit から `git show` で取ります。
+
+```sh
+AMU=../../kotoba-lang/amu; C=<amu の commit>; G=$(mktemp -d)   # G は podman が mount できる場所に置く
+git -C $AMU show $C:seed/bootstrap/aarch64-linux-static-root.elf > $G/root.elf   # 7239484e では sha256 bd025475…
+git -C $AMU show $C:runtime/wasm32-browser-static-host.js > $G/host.js
+podman run --rm --platform linux/arm64 --network none -v $G:$G -v $PWD:$PWD -w $PWD \
+  docker.io/library/python:3.12-alpine sh scripts/browser-build.sh $G/root.elf $G/host.js $C
+```
+
+同じ root と同じ source からは、同じ `kumitate.wasm` が出ます。
+
+### ブラウザの gate（headless Chromium）
+
+wasm の gate と fixture selftest を headless Chromium で動かし、native の結果とバイト単位で比べます。browser は amu の `scripts/seed/check-wasm32-browser.py` が動かします。これは DevTools protocol を pipe で話すだけで、Node・npm・Playwright を使いません。Python は browser を起こして結果を読むだけで、この repo に Python のコードはありません。
+
+```sh
+# G に root.elf がある（上の build）。chromium の入った arm64 Linux の image を使う
+#（例: python:3.12-alpine に apk add chromium をして commit したもの。apk にだけ network が要る）
+grep -v '^#' kotoba/kumitate/GATE-MANIFEST | while read p; do cat "$p"; echo; done > $G/GATE-MANIFEST.kotoba
+podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35=$G -v $G:$G -v $PWD:$PWD -v $AMU:$AMU -w $PWD IMAGE sh -c "
+  $G/root.elf compile $G/GATE-MANIFEST.kotoba --target wasm32-browser --output $G/gate.wasm
+  python3 $AMU/scripts/seed/check-wasm32-browser.py --app $G/gate.wasm --allow 37 --output $G/b-gate
+  python3 $AMU/scripts/seed/check-wasm32-browser.py --app aiueos/kumitate.wasm --allow 35,37,38,39 \
+    --file /fixtures=$PWD/test/fixtures --output $G/b-self -- selftest /fixtures/MANIFEST
+  tail -1 $G/b-self/output"
+```
+
+- 期待値: gate は `:result 18`、selftest は `SCANNED 75 PASS 75 FAIL 0`。
+- 出力（`$G/b-gate/output`、`$G/b-self/output`）は、native の aarch64-linux static image の stdout とバイト単位で同じです（上の「Kotoba gate」）。残り fuel も同じです。
+- 画面そのものの確かめ（例を読んで計画と DAG、拒否される config、実行記録と JUnit、`fetch` が CSP で拒否されること）の記録は [`docs/evidence/kotoba-wasm32-browser-20261023.edn`](docs/evidence/kotoba-wasm32-browser-20261023.edn) にあります。
+- CI には入れていません（上の「Kotoba gate」と同じ理由）。
 
 ## 未実装（要点）
 
-- **ブラウザの画面**: 未実装でブロッカーがあります。selfhost root に wasm32-browser target がありません（kotoba-lang/amu#1515）。scittle や JS で作り直すことはせず、待ちます。
 - **本物の実行と外部接続**（circleci.com、VCS、ローカルでの job 実行）: 未実装でブロッカーがあります。共有の同意 broker `kotoba-lang/wasm-webcomponent/src/kotoba-client-runtime.js` がまだ存在しません。workspace 契約により、product 側で代わりを書くこともしません。
-- **公開**（sites.edn、IPNS）: ブラウザで動く産物が無いため未着地です。
+- **公開**（sites.edn、IPNS）: ブラウザで動く産物（`web/`）はそろいました。どこへ公開するかは owner の判断を待っています（[`docs/aiueos-dapp.md`](docs/aiueos-dapp.md)）。
 
 ## ライセンス
 

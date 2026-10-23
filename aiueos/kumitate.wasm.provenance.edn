@@ -1,0 +1,11 @@
+;; kumitate.wasm provenance (scripts/browser-build.sh). Not the hosted compiler's
+;; :kotoba.provenance/v1: the Amu selfhost root has no provenance output, so this
+;; names the root, the unit and the output by their sha256.
+{:format :kumitate.wasm-provenance/v1
+ :target :wasm32-browser-static/v1
+ :compiler {:repo "kotoba-lang/amu" :commit "7239484e2cd1b3bbd9bc3095edb03fd986f8f6e5" :path "seed/bootstrap/aarch64-linux-static-root.elf" :sha256 "bd0254759e442533ead3e190f361257725667ea252a83b3575a3fb0d65becb66"}
+ :command "compile MANIFEST.kotoba --target wasm32-browser --output kumitate.wasm"
+ :compile-result "{:ok true, :target :wasm32-browser, :format :wasm, :functions 514, :pool-bytes 26809, :bytes 309340}"
+ :unit {:manifest "kotoba/kumitate/MANIFEST" :manifest-sha256 "f57c2ba2c078182b51c600f02e2b85f4ff94966f0e1bd768d484e553cedd713a" :sha256 "0e7b24f034864b8b146257dba5bd92c3f061e890005fb2e2bf300c670065cbc8" :size 223528}
+ :host {:repo "kotoba-lang/amu" :commit "7239484e2cd1b3bbd9bc3095edb03fd986f8f6e5" :path "runtime/wasm32-browser-static-host.js" :sha256 "b63e006e48133a1da5453600bbed5e9e37bbe3955af64c79d27e173275b912e4"}
+ :output {:name "kumitate.wasm" :sha256 "04f231262f38be738c987bea2341a507bd0fee8f5be66fa09f7bca4e325ba5eb" :size 309340}}
