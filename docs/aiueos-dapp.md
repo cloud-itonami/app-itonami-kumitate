@@ -1,6 +1,6 @@
 # kumitate CircleCI 互換 dapp — aiueos 上の分散型設計
 
-状態: 第 1 スライスの実装（2026-10-23）。正本はこの文書です。
+状態: 第 1 スライスとブラウザの画面の実装（2026-10-23）。正本はこの文書です。
 追跡: Linear JUN-346（Kotoba Labs）。兄弟: app-itonami-mihari、app-itonami-dandori（JUN-286、JUN-295）。
 
 ## 目標
@@ -19,11 +19,12 @@ kumitate を「サーバに何も置かない dapp」として作ります。
 | 層 | 実体 | 状態 |
 |---|---|---|
 | 判断コア（pure） | `kotoba/kumitate/10-text` … `70-mcp`。YAML／JSON／XML、regex、expression、検証、展開、API v2、集計、MCP の handler。`:effects #{}` | **実装済み・実測**（gate 18/18、selftest 75/75、aarch64-linux と x86_64-linux） |
-| アプリ記述子 | `aiueos/kumitate.edn`（`:aiueos/kind :app`、imports なし、`:aiueos/wasm nil`） | **実装済み**。aiueos の session／grant への配線は未実装 |
+| アプリ記述子 | `aiueos/kumitate.edn`（`:aiueos/kind :app`、imports なし、`:aiueos/wasm "kumitate.wasm"`） | **実装済み**。aiueos の session／grant への配線は未実装 |
+| wasm の産物 | `aiueos/kumitate.wasm`（`MANIFEST` の unit、amu selfhost root の `wasm32-browser`）と provenance・publication の記録 | **実装済み・実測**（headless Chromium で gate 18、selftest 75/75。native と出力がバイト単位で同じ） |
 | native command | `90-cli`。`validate` `plan` `process` `api` `local` `runs` `runs-export` `junit` `mcp` `selftest` | **実装済み・実測** |
 | agent 統合（MCP） | `80-http`。native TCP（wire 43–47）の上の Streamable HTTP（JSON 応答）。tool は 8 つ | **実装済み・実測**（curl、itonami-agent の HTTP client） |
 | stdio MCP | static runtime に stdin（wire 41）が無い | **ブロック**（kotoba-lang/amu#1516） |
-| ブラウザの画面 | config を貼る／開く、検証、計画、DAG、実行記録の集計。外部通信ゼロ | **ブロック**（kotoba-lang/amu#1515: selfhost に wasm32-browser が無い） |
+| ブラウザの画面 | `web/`。config を貼る／開く、検証、計画、DAG、processed config、実行記録と JUnit の集計。Worker の中の `kumitate.wasm` が計算する。CSP `connect-src 'none'` | **実装済み・実測**（headless Chromium。公開は未着地、下記） |
 | ローカル実行 | `local` が job ごとの手順を出す。実行はしない | 手順だけ実装。実行は**未実装・ブロック**（下記） |
 | 本家 API・VCS への接続 | circleci.com、GitHub 等 | **未実装・ブロック**（同意 broker が無い） |
 | 分散状態 | ADR 0005 の `mon`／`ito`／`nuno` | **未実装**（設計のみ） |
@@ -91,14 +92,26 @@ kumitate を「サーバに何も置かない dapp」として作ります。
 
 DOCTYPE は拒否します（`xml/doctype-unsupported`）。外部 entity は読みません。
 
+## ブラウザの層（end-user app 契約）
+
+workspace の「Kotoba end-user apps run in the user's environment」契約に沿います。
+
+- **origin は静的な産物を配るだけ**です。`web/` の HTML・CSS・JS と、スクリプトにした module（`kumitate.wasm.js`）です。request 時の処理、API、利用者ごとの状態はありません。
+- **ロジックはブラウザの Worker** で動きます。`web/kotoba-host.js`（amu の Worker host）が `kumitate.wasm` を動かし、native と同じ command（`validate` `plan` `process` `runs` `junit`）を呼びます。`web/app.js` は入出力を運んで描くだけです。判断を JS に写していないので、native とブラウザの答えは食い違いません。
+- **外部操作はありません**。ページの CSP は `default-src 'none'`、`connect-src 'none'` です。module の読み込みも fetch を使いません。`kotoba:host/cap` はすべての capability を拒否します（JUN-353 Phase 2 まで）。そのため、この段階では `kotoba.app.client-runtime.v1` の記述子も同意 broker もまだ要りません。本家 API や VCS に接続するときに、記述子と操作ごとの同意を足します（下記）。
+- **module に渡すのは、その実行の入出力だけ**です（amu の entry ABI）。ページは wire 37／39（stdout・stderr）、38（引数）、35（ページが渡したファイルの読み取りだけ）を許します。貼った config や開いたファイルは、ページのメモリから Worker へ渡るだけで、どこにも保存しません。
+- **module は検証してから動かします**。`kumitate.wasm.js` に入れた sha256 と照合します。出所は `aiueos/kumitate.wasm.provenance.edn`（amu の commit、root の hash、unit の hash）にあります。
+
 ## 未実装の境界
 
-- **ブラウザの画面**: Kotoba だけで作る画面には、selfhost の wasm32-browser target が要ります（kotoba-lang/amu#1515。実測で `E1`）。hosted の `bin/amu`（Node/nbb）や scittle で作り直すことは、selfhost の契約でも JUN-295 の方針でもしません。画面は、#1515 が着地してから、判断コアをそのまま wasm にして作ります。
 - **stdio の MCP**: static runtime に wire 41 が無いため作れません（kotoba-lang/amu#1516）。今は HTTP で代わりをしています。
 - **ローカル実行・本家接続**:
   - job の実行（利用者のマシン、または browser Worker）、circleci.com の API v2、VCS は、共有の `kotoba.app.client-runtime.v1` 記述子と、操作ごとの同意が要ります。
   - その broker（`kotoba-lang/wasm-webcomponent/src/kotoba-client-runtime.js`）は、2026-10-23 の時点で存在しません（GitHub API で 404）。
   - workspace 契約により、product 側で代わりを書くことはしません。
   - 着地したら、記述子に service・endpoint・data category・`each-operation` を宣言します。宣言する操作は、たとえば `GET /api/v2/pipeline/{id}/workflow` と `GET /api/v2/workflow/{id}/job` です。
-- **公開**（sites.edn、`itonami deploy app/kumitate`、IPNS）: ブラウザで動く産物が無いので、公開するものがまだありません。
+- **公開**（sites.edn、`itonami deploy app/kumitate`、IPNS）: 公開できる産物（`web/`）はあります。ただ、公開先が決まっていないので、公開していません。
+  - network-awai/cloud-itonami の `sites.edn` の site には、nbb で動く `:generator` が要ります。`itonami deploy` も kbb／nbb です。どちらも Node なので、kumitate の「Node を使わない」方針と合いません。
+  - 今の配信は Cloudflare Pages の中央コピー（移行在庫）です。主経路の IPFS（`itonami deploy app/{repo}`）は、IPNS を含めて owner 判断で保留されています。
+  - どの経路で公開するかは owner の判断を待っています。`web/` はファイルを置くだけで動きます。
 - **aiueos への配線**と**分散状態**: kaikei・dandori と同じ段階で、設計だけです。

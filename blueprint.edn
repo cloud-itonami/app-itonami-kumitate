@@ -7,8 +7,9 @@
  :itonami.blueprint/required-technologies [:kotoba-native :amu-selfhost]
  :itonami.blueprint/status :public-oss
  :itonami.blueprint/maturity :core-only
- ;; 公開先の予定は app.itonami.cloud/kumitate/（network-awai/cloud-itonami の sites.edn、app org）。
- ;; ブラウザで動く産物がまだ無いので、sites.edn には載せていない（docs/aiueos-dapp.md）。
+ ;; ブラウザの産物は web/（静的、外部通信ゼロ、計算は aiueos/kumitate.wasm）。公開先
+ ;; （network-awai/cloud-itonami の sites.edn の app org、`itonami deploy app/kumitate`）は
+ ;; owner の判断待ちで、sites.edn には載せていない（docs/aiueos-dapp.md）。
  ;; :endpoint は書かない。kumitate は利用者の手元で動く道具で、呼び出せる actor ではない。
  :itonami.blueprint/org "app"
  :itonami.blueprint/compat
@@ -19,9 +20,9 @@
   :note "CircleCI にも VCS にも接続しない（kotoba-client-runtime ブローカー未着地）。orbs・functions は取得せず名前付きで拒否する。互換は config の意味と API の形で、CircleCI の実行基盤の再現ではない。"}
  :itonami.blueprint/implementation
  {:language :kotoba
-  :target :aarch64-linux-static-and-x86_64-linux-static
+  :target :aarch64-linux-static-x86_64-linux-static-and-wasm32-browser
   :guest "kotoba/kumitate (GATE-MANIFEST の pure module)"
   :descriptor "aiueos/kumitate.edn"
-  :ui :blocked-on-selfhost-wasm32-browser
+  :ui :static-browser-worker-wasm32
   :mcp :streamable-http-native-tcp
   :capabilities []}}

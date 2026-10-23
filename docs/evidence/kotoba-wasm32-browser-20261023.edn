@@ -1,0 +1,57 @@
+;; kumitate wasm32-browser receipt (Linear JUN-346, JUN-353 Phase 3). The README
+;; "ブラウザの build" and "ブラウザの gate" commands, run on 2026-10-23 on this Mac's
+;; podman machine (applehv, arm64 Linux guest), in python:3.12-alpine with
+;; Alpine's chromium added (apk was the only step with network; every run below
+;; used podman --network none). No Node.js, nbb, JVM, babashka or C. Python only
+;; drives the browser (Amu's scripts/seed/check-wasm32-browser.py, DevTools
+;; protocol on a pipe). Not part of CI: workspace CDCI is stopped.
+{:schema "kumitate.wasm32-browser.v1"
+ :date "2026-10-23"
+ :compiler {:repo "kotoba-lang/amu"
+            :commit "7239484e2cd1b3bbd9bc3095edb03fd986f8f6e5"
+            :pr "kotoba-lang/amu#1526 (the entry ABI, JUN-353 Phase 3)"
+            :path "seed/bootstrap/aarch64-linux-static-root.elf"
+            :sha256 "bd0254759e442533ead3e190f361257725667ea252a83b3575a3fb0d65becb66"}
+ :host {:path "runtime/wasm32-browser-static-host.js" :copy "web/kotoba-host.js"
+        :sha256 "b63e006e48133a1da5453600bbed5e9e37bbe3955af64c79d27e173275b912e4"}
+ :units {:command {:manifest "kotoba/kumitate/MANIFEST"
+                   :sha256 "0e7b24f034864b8b146257dba5bd92c3f061e890005fb2e2bf300c670065cbc8"}
+         :gate {:manifest "kotoba/kumitate/GATE-MANIFEST"
+                :sha256 "bb1f303528be8951aa64471f623549308c4ba39a7b43b840af4e493ab1da0f9c"}}
+ :modules [{:name "kumitate.wasm" :bytes 309340 :functions 514
+            :sha256 "04f231262f38be738c987bea2341a507bd0fee8f5be66fa09f7bca4e325ba5eb"
+            :memory-pages-after-start 4615}
+           {:name "gate.wasm" :bytes 333942 :functions 541
+            :sha256 "ee551682f734cbd44787d956450d1a6f2cf63fccfdf487b2656f14554b687bcf"}]
+ :reproducible "the same kumitate.wasm from the roots of amu 7ff8d9d3+#1526 (8742dd67), c00d98a4+#1526 (b550d833) and 7239484e (bd025475): the module's bytes do not depend on the root's own changes"
+ :browser "Chrome/155.0.8059.84 (Alpine chromium, headless, arm64)"
+ :results
+ {:gate {:wasm32-browser {:report "{:status :ok :result 18 ...}" :allow [37]
+                          :output-sha256 "7dd2b0f859df02c9bc2fb5b731dc10a588cf5124ecf92cb67a8a63453b5e3305"}
+         :aarch64-linux {:image-sha256 "16fe0a1f27cdfe155fd3b9e906f710d51a769e2236a797a3c5a97dd4dfe6e9be"
+                         :stdout-sha256 "7dd2b0f859df02c9bc2fb5b731dc10a588cf5124ecf92cb67a8a63453b5e3305"}
+         :remaining-fuel {:wasm32-browser 9007199254558432 :aarch64-linux 9007199254558432}}
+  :selftest {:wasm32-browser {:report "{:status :ok :result 0 ...}" :allow [35 37 38 39] :files 133
+                              :args ["selftest" "/fixtures/MANIFEST"] :last-line "SCANNED 75 PASS 75 FAIL 0"
+                              :output-sha256 "8a173e83c42a7422aac39d10ba60f3f9f51992ac793cade5c10d9d302de758f2"}
+             :aarch64-linux {:image-sha256 "f4e79a24b024d19991a4e88766dc2dd1199fb5d2f44cecea0abd8367f521d90e"
+                             :stdout-sha256 "8a173e83c42a7422aac39d10ba60f3f9f51992ac793cade5c10d9d302de758f2"}
+             :remaining-fuel {:wasm32-browser 9007199252721880 :aarch64-linux 9007199252721880}}
+  :equal "wasm32-browser output = native aarch64-linux stdout, byte for byte, for both; the same remaining fuel"}
+ :negative-controls
+ [{:run "selftest without the :fs/app-data grant (--allow 37,38,39)"
+   :result "trap, exit 120, stderr KEXE_CAP {:wire 35 :refused :wasm32-browser}"}
+  {:run "selftest over a copy of test/fixtures whose expected/validate/inline-orb.json names config/orb-xx"
+   :result "SCANNED 75 PASS 74 FAIL 1, :result 1"}]
+ :ui {:page "web/index.html (opened as file://)"
+      :files {"web/index.html" "7fbc8344067dff47517ebd118a0008566edb0f6e7366247d4e465d1151db7a28"
+              "web/app.js" "7d7335cdc570e5ad708484bef702d9d9e3a95b45ea3c5ffed387ebb7e3bba8a9"
+              "web/app.css" "a657aa914568d6e422dbc36e7e05861fb2f51dc3e63293dd6d03ae41161c133d"}
+      :checks ["the module's sha256 verified before compile (WebCrypto)"
+               "example config, branch main: accepted, 0 errors 0 warnings; plan of 6 jobs; DAG of 6 nodes and 6 edges; processed config begins `version: 2`"
+               "test/fixtures/config/refused/real-gatsby-orbs.yml: refused, 4 errors (config/orb-unresolved x3, plan/config-refused) and 3 warnings, by name"
+               "runs/kumitate-runs.json + junit/run1.xml + junit/run2.xml: 2 workflows 5 jobs, test flaky; 2 JUnit reports, 2 failing and 2 flaky tests"
+               "fetch('https://example.com/') from the page: refused (connect-src), one securitypolicyviolation"]
+      :timing-ms {:plan-and-process 104 :refused-config 114 :runs-and-junit 51}}
+ :not-measured ["publication (sites.edn, itonami deploy, IPNS): not done, owner decision (docs/aiueos-dapp.md)"
+                "x86_64 Chrome and other browsers: only Alpine's arm64 Chromium here (amu's qualify-x86_64 job runs Chrome on x86_64 for amu's own probes)"]}

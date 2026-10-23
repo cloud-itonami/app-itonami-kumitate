@@ -4,16 +4,24 @@
 ;;
 ;; 判断コアは kotoba/kumitate の pure module（10-text から 70-mcp まで）。
 ;; config の検証・展開・API v2 の形・実行記録と JUnit の集計は計算だけで、
-;; :effects #{} である。I/O（ファイル、TCP、画面）はこの外の層（80-http、
-;; 90-cli、将来のブラウザ層）が持つ。
-;; wasm の産物は無い: amu selfhost に wasm32-browser target が無い
-;; （kotoba-lang/amu#1515）。今の産物は native static image（docs/evidence）。
+;; :effects #{} である。
+;;
+;; wasm の産物は aiueos/kumitate.wasm。kotoba/kumitate/MANIFEST の unit を amu
+;; selfhost root が wasm32-browser-static/v1 にしたもの（guest と Kotoba runtime の
+;; 1 module、export は memory と start(fuel)）。出所は kumitate.wasm.provenance.edn、
+;; 公開の印は kumitate.wasm.publication.edn（:kotoba.output-set/v1）。
+;; module の import（kotoba:host の write/cap/now/exit/input）は外部操作ではない:
+;; 入出力は、ページが Worker に渡した引数と読み取り専用のファイルと stdout/stderr
+;; だけ（entry ABI、wire 35/37/38/39）。kotoba:host/cap はすべてを拒否する
+;; （JUN-353 Phase 2 の同意 broker まで）。だから :imports は空のまま。
+;; :memory-pages は実測（start が arena をすべて確保した後の 4615 page、約 288 MiB）。
+;; :fuel は 1 回の command に十分な上限（fixture selftest 75 件の全体で約 202 万）。
 ;; aiueos session/grant への配線は未実装（docs/aiueos-dapp.md の未実装境界）。
 {:aiueos/component :app/kumitate
  :aiueos/kind :app
  :aiueos/trust :untrusted
- :aiueos/source "kotoba/kumitate/GATE-MANIFEST"
- :aiueos/wasm nil
+ :aiueos/source "kotoba/kumitate/MANIFEST"
+ :aiueos/wasm "kumitate.wasm"
  :aiueos/entry "main"
  :aiueos/args []
  :aiueos/imports #{}
@@ -27,4 +35,4 @@
                    :app/runs-export
                    :app/junit}
  :aiueos/effects #{}
- :aiueos/limits {:memory-pages 256 :fuel 50000000}}
+ :aiueos/limits {:memory-pages 4615 :fuel 50000000}}

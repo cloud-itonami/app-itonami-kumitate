@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- kumitate's browser UI (JUN-346, JUN-353 Phase 3). A static page: the
+     origin serves these files and nothing else. Every computation is the
+     Kotoba module kumitate.wasm (compiled from kotoba/kumitate by the Amu
+     selfhost root, target wasm32-browser), run in a Worker by kotoba-host.js.
+     The CSP admits no network at all (connect-src 'none'): what you paste or
+     open stays in this browser. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' file: 'wasm-unsafe-eval'; style-src 'self' file:; img-src 'self' data:; worker-src blob:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>kumitate</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <h1>kumitate <span class="sub">CircleCI-compatible pipeline planning</span></h1>
+    <p class="lede">Validate a <code>.circleci/config.yml</code> (version 2.1), see the processed plan and the
+      workflow graph, and summarize run records or JUnit reports. Everything runs in this browser:
+      the page has no network access, and nothing you paste or open is sent anywhere.</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="card" aria-labelledby="config-h">
+    <h2 id="config-h">Config</h2>
+    <div class="row">
+      <label class="file">Open config.yml<input id="config-file" type="file" accept=".yml,.yaml,text/yaml,text/plain"></label>
+      <button id="example" type="button" class="ghost">Load an example</button>
+      <span id="config-name" class="muted"></span>
+    </div>
+    <textarea id="config" spellcheck="false" autocomplete="off" placeholder="version: 2.1&#10;jobs: ..."></textarea>
+    <details class="inputs">
+      <summary>Pipeline values</summary>
+      <div class="grid">
+        <label>Branch <input id="branch" type="text" placeholder="main" autocomplete="off"></label>
+        <label>Tag <input id="tag" type="text" placeholder="v1.2.3" autocomplete="off"></label>
+        <label class="wide">Parameters, one <code>name=value</code> a line
+          <textarea id="params" spellcheck="false" rows="3" placeholder="deploy=true"></textarea></label>
+      </div>
+      <p class="muted">Values you leave empty stay undecided: filters and conditions that depend on them are kept as written, with a warning.</p>
+    </details>
+    <div class="row">
+      <button id="run-config" type="button" class="primary">Validate and plan</button>
+      <span id="config-status" class="status" role="status"></span>
+    </div>
+    <div id="config-out" class="out" hidden>
+      <div id="diagnostics"></div>
+      <nav class="tabs" role="tablist">
+        <button type="button" role="tab" data-tab="plan" aria-selected="true">Plan</button>
+        <button type="button" role="tab" data-tab="dag" aria-selected="false">Workflow graph</button>
+        <button type="button" role="tab" data-tab="process" aria-selected="false">Processed config</button>
+      </nav>
+      <div id="tab-plan" class="tab"></div>
+      <div id="tab-dag" class="tab" hidden></div>
+      <div id="tab-process" class="tab" hidden></div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="runs-h">
+    <h2 id="runs-h">Runs and tests</h2>
+    <p class="muted">Open run records (CircleCI API v2 <code>items</code> JSON, or <code>kumitate.runs.v1</code>) or JUnit XML reports. Several JUnit files are summarized together.</p>
+    <div class="row">
+      <label class="file">Open files<input id="runs-file" type="file" multiple accept=".json,.xml,application/json,text/xml,application/xml"></label>
+      <span id="runs-status" class="status" role="status"></span>
+    </div>
+    <div id="runs-out" class="out" hidden></div>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  <p>kumitate is a Kotoba program compiled to WebAssembly by the Amu selfhost compiler. It only computes:
+    it fetches no orbs, runs no job, and connects to neither CircleCI nor a VCS. Capabilities beyond the
+    run's own input and output are refused until the shared consent broker lands (JUN-353 Phase 2).</p>
+  <p id="runtime" class="muted"></p>
+  <p class="muted">CircleCI is a trademark of its owner; kumitate claims compatibility only. AGPL-3.0-or-later.</p>
+</footer>
+
+<script src="kotoba-host.js"></script>
+<script src="kumitate.wasm.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
