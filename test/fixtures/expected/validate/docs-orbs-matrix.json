@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"config/orb-unresolved","path":"orbs.node","message":"orb circleci/node@4.7 is not fetched; kumitate reads only the config you pass"},{"code":"config/orb-unresolved","path":"jobs.test.steps[1].node/install","message":"orb command `node/install` is not fetched"}],"warnings":[]}

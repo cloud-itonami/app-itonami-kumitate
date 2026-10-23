@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"config/orb-inline-unsupported","path":"orbs.mine","message":"inline orbs are not expanded"},{"code":"config/orb-unresolved","path":"jobs.a.steps[0]","message":"orb command `mine/hello` is not fetched"}],"warnings":[]}

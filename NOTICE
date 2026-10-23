@@ -1,0 +1,15 @@
+app-itonami-kumitate
+Copyright (C) 2026 cloud-itonami contributors. AGPL-3.0-or-later (LICENSE).
+
+test/fixtures/config/ holds unmodified .circleci/config.yml files from other
+projects, as test inputs. Each keeps its own license; sources, commits and
+sha256 are in test/fixtures/config/SOURCES.edn.
+
+- clj-kondo/clj-kondo, borkdude/jet, babashka/nbb, babashka/babashka,
+  kotoba-lang/org-babashka-nbb: Eclipse Public License 1.0
+  (https://www.eclipse.org/legal/epl-v10.html)
+- apollographql/apollo-client, gatsbyjs/gatsby, influxdata/telegraf,
+  mithril-lang/mithril-agent-runtime: MIT License
+
+CircleCI is a trademark of its owner. kumitate claims compatibility with
+CircleCI's configuration format and API shapes only; no affiliation.

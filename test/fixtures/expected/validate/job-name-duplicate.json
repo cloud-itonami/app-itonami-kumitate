@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"plan/job-name-duplicate","path":"workflows.w.a","message":"two jobs of this workflow have this name"}],"warnings":[]}

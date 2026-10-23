@@ -1,0 +1,13 @@
+# After the CircleCI docs "Hello world" config (docs/guides/getting-started).
+version: 2.1
+jobs:
+  hello-job:
+    docker:
+      - image: cimg/node:20.11
+    steps:
+      - checkout
+      - run: node --version
+workflows:
+  my-workflow:
+    jobs:
+      - hello-job

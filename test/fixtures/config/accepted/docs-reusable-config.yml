@@ -1,0 +1,83 @@
+# After the CircleCI docs "Reusable config reference": pipeline parameters,
+# executors and commands with parameters, a steps parameter, a when step,
+# executor environment merged with the job's.
+version: 2.1
+parameters:
+  run-integration:
+    type: boolean
+    default: false
+  image-tag:
+    type: string
+    default: "3.12"
+executors:
+  python:
+    parameters:
+      tag:
+        type: string
+        default: "3.11"
+    docker:
+      - image: cimg/python:<< parameters.tag >>
+    environment:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      LANG: C.UTF-8
+commands:
+  install:
+    parameters:
+      extras:
+        type: string
+        default: ""
+      cache:
+        type: boolean
+        default: true
+    steps:
+      - when:
+          condition: << parameters.cache >>
+          steps:
+            - restore_cache:
+                keys:
+                  - pip-v1-{{ checksum "requirements.txt" }}
+      - run: pip install -r requirements.txt << parameters.extras >>
+  with-report:
+    parameters:
+      body:
+        type: steps
+      dir:
+        type: string
+        default: reports
+    steps:
+      - run: mkdir -p << parameters.dir >>
+      - steps: << parameters.body >>
+      - store_test_results:
+          path: << parameters.dir >>
+jobs:
+  test:
+    parameters:
+      level:
+        type: enum
+        enum: [unit, integration]
+        default: unit
+    executor:
+      name: python
+      tag: << pipeline.parameters.image-tag >>
+    environment:
+      LANG: en_US.UTF-8
+    steps:
+      - checkout
+      - install:
+          extras: "-r dev.txt"
+      - with-report:
+          body:
+            - run: pytest -m << parameters.level >> --junitxml=reports/junit.xml
+workflows:
+  test:
+    jobs:
+      - test
+      - test:
+          name: integration
+          level: integration
+          requires: [test]
+  nightly:
+    when: << pipeline.parameters.run-integration >>
+    jobs:
+      - test:
+          level: integration

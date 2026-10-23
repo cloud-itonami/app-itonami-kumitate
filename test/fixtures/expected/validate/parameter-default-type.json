@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"config/parameter-default","path":"parameters.retries","message":"`three` is not an integer"},{"code":"config/parameter-default","path":"parameters.flavor","message":"`c` is not one of the enum values"}],"warnings":[]}

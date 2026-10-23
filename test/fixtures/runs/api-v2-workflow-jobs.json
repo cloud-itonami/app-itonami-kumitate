@@ -1,0 +1,5 @@
+{"items":[
+ {"dependencies":[],"job_number":101,"id":"5c0b3a10-0d7e-4a4b-9f0d-1a2b3c4d5e01","started_at":"2026-10-20T01:00:00Z","name":"build","project_slug":"gh/example/project","status":"success","type":"build","stopped_at":"2026-10-20T01:02:30Z"},
+ {"dependencies":["5c0b3a10-0d7e-4a4b-9f0d-1a2b3c4d5e01"],"job_number":102,"id":"5c0b3a10-0d7e-4a4b-9f0d-1a2b3c4d5e02","started_at":"2026-10-20T01:02:40Z","name":"test","project_slug":"gh/example/project","status":"failed","type":"build","stopped_at":"2026-10-20T01:07:40Z"},
+ {"dependencies":["5c0b3a10-0d7e-4a4b-9f0d-1a2b3c4d5e02"],"job_number":null,"id":"5c0b3a10-0d7e-4a4b-9f0d-1a2b3c4d5e03","started_at":null,"name":"hold","project_slug":"gh/example/project","status":"blocked","type":"approval","approval_request_id":"5c0b3a10-0d7e-4a4b-9f0d-1a2b3c4d5e03","stopped_at":null}
+],"next_page_token":null}

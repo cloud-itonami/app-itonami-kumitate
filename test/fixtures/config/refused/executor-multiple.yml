@@ -1,0 +1,13 @@
+version: 2.1
+jobs:
+  a:
+    docker: [{image: cimg/base:stable}]
+    machine: {image: ubuntu-2404:current}
+    steps: [checkout]
+  b:
+    steps: [checkout]
+  c:
+    executor: nowhere
+    steps: [checkout]
+workflows:
+  w: {jobs: [a, b, c]}

@@ -1,0 +1,15 @@
+;; Sources of the third-party configs in this directory: each file is the
+;; repository's .circleci/config.yml at the commit, byte for byte, under its
+;; own license (NOTICE). Fetched 2026-10-23 with the GitHub contents API
+;; (gh api repos/OWNER/REPO/contents/.circleci/config.yml?ref=COMMIT), or read
+;; from the local checkout named. The other configs here are written for
+;; kumitate; the docs-* ones follow the CircleCI documentation pages they name.
+[{:file "accepted/real-clj-kondo.yml" :repo "clj-kondo/clj-kondo" :commit "b7a4e711f2aba6975f63c2e72310ad30232beccd" :license "EPL-1.0" :sha256 "1f67b82227e59bd536978c04b8a53b9fdda7545b2f0f40c31eb0549e722cf266"}
+ {:file "accepted/real-borkdude-jet.yml" :repo "borkdude/jet" :commit "3d990da120b82c0375599577b897b63b5fe67942" :license "EPL-1.0" :sha256 "2fb7d16d2a4578f4a862c2d0a3ffbdaf67efd18a4576cd49735741a5a2f785a6"}
+ {:file "accepted/real-babashka-nbb.yml" :repo "babashka/nbb" :commit "0345b451dc1bbe0e875d1c4f8ae11b1767b766e8" :license "EPL-1.0" :sha256 "1423202ecf09c76595793ae29229603ed6d4bc907fd46d7f48e169fe4e804d41"}
+ {:file "accepted/real-mithril-agent-runtime.yml" :repo "mithril-lang/mithril-agent-runtime" :commit "47478e6b51f6f22e55193d9d4d88c9bf5f6ddaa2" :license "MIT" :sha256 "55b161c8973cc97d3340af5d17d370e6c7cb3816559f3da059d9c3a2dd9c1808"}
+ {:file "accepted/real-apollo-client.yml" :repo "apollographql/apollo-client" :commit "c4aeadcd44688b39aa5f60d8bee178531c546028" :license "MIT" :sha256 "a5b0c41782a56edc154a404c25d27dd8829b095a19eb4de66034e21d15378d4e"}
+ {:file "refused/real-babashka-setup-orb.yml" :repo "babashka/babashka" :commit "66222a261dd9615f1ac4edb5aa5400031dce130a" :license "EPL-1.0" :sha256 "1e65e370e823ef50fa9e7d79aad233b119f3a1917e4e2da8c5add4e344d91834"}
+ {:file "refused/real-gatsby-orbs.yml" :repo "gatsbyjs/gatsby" :commit "516700a1dca1e982b6d098ab57230b25e0318a1f" :license "MIT" :sha256 "4c321ba37101914669195fee594e193cbe25fe92d9a9ced780e0492275aacfe4"}
+ {:file "refused/real-telegraf-orbs.yml" :repo "influxdata/telegraf" :commit "8680868b57e7b503783e355d566819e183e8fa6f" :license "MIT" :sha256 "c1e5db109ae79661175a7adbcf221d80d83905ad76a2d3f76ef626eba076da76"}
+ {:file "refused/real-org-babashka-nbb-2.0.yml" :repo "kotoba-lang/org-babashka-nbb" :commit "33575ae52f649bef9bf1d58eb713129b7e8b8718" :license "EPL-1.0" :sha256 "168646e802131d2b990a806ff117c9ac4dea9e2e923a877281b6cf798d033da4"}]

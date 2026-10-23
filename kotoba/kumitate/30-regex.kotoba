@@ -1,0 +1,250 @@
+;; 30-regex (prefix rx-): the regular expressions of CircleCI branch and tag
+;; filters (/.../) and of the `matches` logic statement. A pattern matches the
+;; WHOLE value (as Java's String.matches, which CircleCI documents for filters).
+;;
+;; Syntax: literals, . [abc] [a-z] [^..] \d \D \w \W \s \S and escaped
+;; punctuation, groups ( ) and (?: ), alternation |, * + ? and {m} {m,} {m,n}
+;; (lazy ? suffixes are read and ignored: whole-match is the same), ^ and $.
+;; Refused by name: regex/unbalanced, regex/bad-class, regex/bad-repeat,
+;; regex/unsupported (look-around, back references, named groups, flags),
+;; regex/too-large (a repeat count over 100, or over 4000 instructions).
+;; Matching is a Pike VM over code points: linear in the value, no backtracking.
+
+;; a parsed pattern: op 1 char c, 2 any, 3 class (cls = lo hi pairs, c 1 when
+;; negated), 4 concatenation, 5 alternation, 6 repeat kid lo..hi (hi -1 = no
+;; bound), 7 ^, 8 $, 9 empty
+(defrecord RX [op :i64 c :i64 lo :i64 hi :i64 kids [:list [:ref :kumitate/RX]] cls :vector-i64])
+(defrecord RP [node [:ref :kumitate/RX] pos :i64 err :string])
+
+(defn rx-kids [] [:list [:ref :kumitate/RX]] (typed-list-new [:list [:ref :kumitate/RX]]))
+(defn rx-leaf [op :i64 c :i64] [:ref :kumitate/RX] (->RX op c 0 0 (rx-kids) (vector-alloc 0)))
+(defn rx-cls [ranges :vector-i64 neg :i64] [:ref :kumitate/RX] (->RX 3 neg 0 0 (rx-kids) ranges))
+(defn rx-fail [code :string i :i64] [:ref :kumitate/RP] (->RP (rx-leaf 9 0) i code))
+
+(defn rx-ranges-d [] :vector-i64 [48 57])
+(defn rx-ranges-w [] :vector-i64 [48 57 65 90 95 95 97 122])
+(defn rx-ranges-s [] :vector-i64 [9 13 32 32])
+(defn rx-vcat [a :vector-i64 b :vector-i64] :vector-i64
+  (loop [i 0 v a] (if (< i (vector-count b)) (recur (+ i 1) (vector-conj v (vector-at b i))) v)))
+
+;; an escape at p (p is after the backslash): a node, or a class
+(defn rx-escape [p :string i :i64] [:ref :kumitate/RP]
+  (if (>= i (tx-len p)) (rx-fail "regex/unbalanced" i)
+    (let [c (tx-cp p i) w (tx-w c)]
+      (cond (= c 100) (->RP (rx-cls (rx-ranges-d) 0) (+ i 1) "")
+            (= c 68) (->RP (rx-cls (rx-ranges-d) 1) (+ i 1) "")
+            (= c 119) (->RP (rx-cls (rx-ranges-w) 0) (+ i 1) "")
+            (= c 87) (->RP (rx-cls (rx-ranges-w) 1) (+ i 1) "")
+            (= c 115) (->RP (rx-cls (rx-ranges-s) 0) (+ i 1) "")
+            (= c 83) (->RP (rx-cls (rx-ranges-s) 1) (+ i 1) "")
+            (= c 116) (->RP (rx-leaf 1 9) (+ i 1) "")
+            (= c 110) (->RP (rx-leaf 1 10) (+ i 1) "")
+            (or (tx-digit? c) (= c 107) (= c 98) (= c 66) (= c 112) (= c 80) (= c 81) (= c 69))
+              (rx-fail "regex/unsupported" i)
+            (tx-alpha? c) (rx-fail "regex/unsupported" i)
+            :else (->RP (rx-leaf 1 c) (+ i w) "")))))
+
+;; a class body from i (after '['): ranges up to ']'
+(defn rx-class [p :string i0 :i64] [:ref :kumitate/RP]
+  (let [neg (if (and (< i0 (tx-len p)) (= (tx-cp p i0) 94)) 1 0)]
+    (loop [i (+ i0 neg) v (vector-alloc 0) first true]
+      (if (>= i (tx-len p)) (rx-fail "regex/bad-class" i)
+        (let [c (tx-cp p i)]
+          (cond (and (= c 93) (not first)) (->RP (rx-cls v neg) (+ i 1) "")
+                (and (= c 91) (< (+ i 1) (tx-len p)) (= (tx-cp p (+ i 1)) 58)) (rx-fail "regex/unsupported" i)
+                :else
+                  (let [one (if (= c 92)
+                              (let [e (rx-escape p (+ i 1))]
+                                (if (not (tx-empty? (:err e))) e
+                                  (if (= (:op (:node e)) 3)
+                                    (if (= (:c (:node e)) 1) (rx-fail "regex/unsupported" i) e)
+                                    (->RP (rx-cls [(:c (:node e)) (:c (:node e))] 0) (:pos e) ""))))
+                              (->RP (rx-cls [c c] 0) (+ i (tx-w c)) ""))]
+                    (if (not (tx-empty? (:err one))) one
+                      (let [j (:pos one) lo (vector-at (:cls (:node one)) 0)]
+                        ;; a range a-z (a '-' before ']' is literal)
+                        (if (and (= (vector-count (:cls (:node one))) 2) (< (+ j 1) (tx-len p))
+                                 (= (tx-cp p j) 45) (not (= (tx-cp p (+ j 1)) 93)))
+                          (let [h (tx-cp p (+ j 1))
+                                hr (if (= h 92) (rx-escape p (+ j 2)) (->RP (rx-leaf 1 h) (+ j 1 (tx-w h)) ""))]
+                            (cond (not (tx-empty? (:err hr))) hr
+                                  (not (= (:op (:node hr)) 1)) (rx-fail "regex/bad-class" j)
+                                  (< (:c (:node hr)) lo) (rx-fail "regex/bad-class" j)
+                                  :else (recur (:pos hr) (vector-conj (vector-conj v lo) (:c (:node hr))) false)))
+                          (recur j (rx-vcat v (:cls (:node one))) false)))))))))))
+
+;; digits from i: the value and the offset after them (-1 value when none)
+(defn rx-num [p :string i :i64] :vector-i64
+  (loop [k i v 0]
+    (if (and (< k (tx-len p)) (tx-digit? (tx-cp p k)) (< v 100000))
+      (recur (+ k 1) (+ (* v 10) (- (tx-cp p k) 48)))
+      [(if (= k i) -1 v) k])))
+
+(defn rx-atom [p :string i :i64 depth :i64] [:ref :kumitate/RP]
+  (let [c (tx-cp p i)]
+    (cond (> depth 32) (rx-fail "regex/too-large" i)
+          (= c 40)
+            (let [s (if (and (< (+ i 1) (tx-len p)) (= (tx-cp p (+ i 1)) 63)) 1 0)]
+              (if (and (= s 1) (not (and (< (+ i 2) (tx-len p)) (= (tx-cp p (+ i 2)) 58))))
+                (rx-fail "regex/unsupported" i)
+                (let [r (rx-alt p (+ i 1 (* 2 s)) (+ depth 1))]
+                  (cond (not (tx-empty? (:err r))) r
+                        (or (>= (:pos r) (tx-len p)) (not (= (tx-cp p (:pos r)) 41))) (rx-fail "regex/unbalanced" (:pos r))
+                        :else (->RP (:node r) (+ (:pos r) 1) "")))))
+          (= c 91) (rx-class p (+ i 1))
+          (= c 46) (->RP (rx-leaf 2 0) (+ i 1) "")
+          (= c 94) (->RP (rx-leaf 7 0) (+ i 1) "")
+          (= c 36) (->RP (rx-leaf 8 0) (+ i 1) "")
+          (= c 92) (rx-escape p (+ i 1))
+          (or (= c 42) (= c 43) (= c 63) (= c 123)) (rx-fail "regex/bad-repeat" i)
+          :else (->RP (rx-leaf 1 c) (+ i (tx-w c)) ""))))
+
+(defn rx-repeat [p :string i :i64 depth :i64] [:ref :kumitate/RP]
+  (let [a (rx-atom p i depth)]
+    (if (not (tx-empty? (:err a))) a
+      (loop [r a]
+        (let [j (:pos r) n (tx-len p)]
+          (if (>= j n) r
+            (let [c (tx-cp p j)]
+              (cond (= c 42) (recur (->RP (->RX 6 0 0 -1 (conj (rx-kids) (:node r)) (vector-alloc 0)) (rx-skip-lazy p (+ j 1)) ""))
+                    (= c 43) (recur (->RP (->RX 6 0 1 -1 (conj (rx-kids) (:node r)) (vector-alloc 0)) (rx-skip-lazy p (+ j 1)) ""))
+                    (= c 63) (recur (->RP (->RX 6 0 0 1 (conj (rx-kids) (:node r)) (vector-alloc 0)) (rx-skip-lazy p (+ j 1)) ""))
+                    (= c 123)
+                      (let [m (rx-num p (+ j 1)) lo (vector-at m 0) k (vector-at m 1)]
+                        (cond (< lo 0) (rx-fail "regex/bad-repeat" j)
+                              (>= k n) (rx-fail "regex/bad-repeat" j)
+                              (= (tx-cp p k) 125)
+                                (if (> lo 100) (rx-fail "regex/too-large" j)
+                                  (recur (->RP (->RX 6 0 lo lo (conj (rx-kids) (:node r)) (vector-alloc 0)) (rx-skip-lazy p (+ k 1)) "")))
+                              (= (tx-cp p k) 44)
+                                (let [m2 (rx-num p (+ k 1)) hi (vector-at m2 0) k2 (vector-at m2 1)]
+                                  (cond (or (>= k2 n) (not (= (tx-cp p k2) 125))) (rx-fail "regex/bad-repeat" j)
+                                        (and (>= hi 0) (< hi lo)) (rx-fail "regex/bad-repeat" j)
+                                        (or (> lo 100) (> hi 100)) (rx-fail "regex/too-large" j)
+                                        :else (recur (->RP (->RX 6 0 lo hi (conj (rx-kids) (:node r)) (vector-alloc 0)) (rx-skip-lazy p (+ k2 1)) ""))))
+                              :else (rx-fail "regex/bad-repeat" j)))
+                    :else r))))))))
+(defn rx-skip-lazy [p :string i :i64] :i64
+  (if (and (< i (tx-len p)) (or (= (tx-cp p i) 63) (= (tx-cp p i) 43))) (+ i 1) i))
+
+(defn rx-concat [p :string i0 :i64 depth :i64] [:ref :kumitate/RP]
+  (loop [i i0 kids (rx-kids)]
+    (if (or (>= i (tx-len p)) (= (tx-cp p i) 124) (= (tx-cp p i) 41))
+      (->RP (->RX 4 0 0 0 kids (vector-alloc 0)) i "")
+      (let [r (rx-repeat p i depth)]
+        (if (not (tx-empty? (:err r))) r (recur (:pos r) (conj kids (:node r))))))))
+(defn rx-alt [p :string i0 :i64 depth :i64] [:ref :kumitate/RP]
+  (loop [i i0 kids (rx-kids)]
+    (let [r (rx-concat p i depth)]
+      (cond (not (tx-empty? (:err r))) r
+            (and (< (:pos r) (tx-len p)) (= (tx-cp p (:pos r)) 124)) (recur (+ (:pos r) 1) (conj kids (:node r)))
+            (= (count kids) 0) r
+            :else (->RP (->RX 5 0 0 0 (conj kids (:node r)) (vector-alloc 0)) (:pos r) "")))))
+(defn rx-parse [p :string] [:ref :kumitate/RP]
+  (let [r (rx-alt p 0 0)]
+    (cond (not (tx-empty? (:err r))) r
+          (< (:pos r) (tx-len p)) (rx-fail "regex/unbalanced" (:pos r))
+          :else r)))
+
+;; ---------------------------------------------------------------------------
+;; Code: 3 words an instruction. 1 CHAR c, 2 ANY, 3 CLASS k (classes[k], neg),
+;; 4 SPLIT x y, 5 JMP x, 6 MATCH, 7 BOL, 8 EOL.
+
+(defrecord RC [code :vector-i64 classes [:list :vector-i64] negs :vector-i64])
+
+(defn rx-size [n [:ref :kumitate/RX]] :i64
+  (let [op (:op n)]
+    (cond (= op 4) (loop [i 0 s 0] (if (< i (count (:kids n))) (recur (+ i 1) (+ s (rx-size (nth (:kids n) i)))) s))
+          (= op 5) (loop [i 0 s 0] (if (< i (count (:kids n))) (recur (+ i 1) (+ s (rx-size (nth (:kids n) i)))) (+ s (* 2 (- (count (:kids n)) 1)))))
+          (= op 6) (let [e (rx-size (nth (:kids n) 0)) lo (:lo n) hi (:hi n)]
+                     (+ (* lo e) (if (< hi 0) (+ e 2) (* (- hi lo) (+ e 1)))))
+          (= op 9) 0
+          :else 1)))
+(defn rx-op [rc [:ref :kumitate/RC] op :i64 a :i64 b :i64] [:ref :kumitate/RC]
+  (assoc rc :code (vector-conj (vector-conj (vector-conj (:code rc) op) a) b)))
+(defn rx-pc [rc [:ref :kumitate/RC]] :i64 (quot (vector-count (:code rc)) 3))
+(defn rx-emit [rc [:ref :kumitate/RC] n [:ref :kumitate/RX]] [:ref :kumitate/RC]
+  (let [op (:op n)]
+    (cond (= op 1) (rx-op rc 1 (:c n) 0)
+          (= op 2) (rx-op rc 2 0 0)
+          (= op 3) (rx-op (assoc (assoc rc :classes (conj (:classes rc) (:cls n))) :negs (vector-conj (:negs rc) (:c n)))
+                          3 (count (:classes rc)) 0)
+          (= op 7) (rx-op rc 7 0 0)
+          (= op 8) (rx-op rc 8 0 0)
+          (= op 9) rc
+          (= op 4) (loop [i 0 r rc] (if (< i (count (:kids n))) (recur (+ i 1) (rx-emit r (nth (:kids n) i))) r))
+          (= op 5)
+            ;; SPLIT next L2; e1; JMP end; L2: SPLIT ...; last
+            (let [k (count (:kids n))
+                  end (+ (rx-pc rc) (rx-size n))]
+              (loop [i 0 r rc]
+                (if (= i (- k 1)) (rx-emit r (nth (:kids n) i))
+                  (let [e (nth (:kids n) i) s (rx-size e) here (rx-pc r)
+                        r1 (rx-op r 4 (+ here 1) (+ here 2 s))
+                        r2 (rx-emit r1 e)]
+                    (recur (+ i 1) (rx-op r2 5 end 0))))))
+          :else
+            (let [e (nth (:kids n) 0) lo (:lo n) hi (:hi n)
+                  r0 (loop [i 0 r rc] (if (< i lo) (recur (+ i 1) (rx-emit r e)) r))]
+              (if (< hi 0)
+                ;; L: SPLIT body end; body; JMP L
+                (let [here (rx-pc r0) s (rx-size e)
+                      r1 (rx-op r0 4 (+ here 1) (+ here 2 s))
+                      r2 (rx-emit r1 e)]
+                  (rx-op r2 5 here 0))
+                ;; (hi - lo) times: SPLIT body end-of-all; body
+                (let [s (rx-size e) end (+ (rx-pc r0) (* (- hi lo) (+ s 1)))]
+                  (loop [i 0 r r0]
+                    (if (>= i (- hi lo)) r
+                      (let [here (rx-pc r)]
+                        (recur (+ i 1) (rx-emit (rx-op r 4 (+ here 1) end) e)))))))))))
+(defn rx-compile [n [:ref :kumitate/RX]] [:ref :kumitate/RC]
+  (rx-op (rx-emit (->RC (vector-alloc 0) (typed-list-new [:list :vector-i64]) (vector-alloc 0)) n) 6 0 0))
+
+(defn rx-in-class [rc [:ref :kumitate/RC] k :i64 c :i64] :bool
+  (let [v (nth (:classes rc) k)
+        hit (loop [i 0] (cond (>= i (vector-count v)) false
+                              (and (>= c (vector-at v i)) (<= c (vector-at v (+ i 1)))) true
+                              :else (recur (+ i 2))))]
+    (if (= (vector-at (:negs rc) k) 1) (not hit) hit)))
+
+;; add pc and its epsilon closure to the list l (seen marks pcs already in it)
+(defrecord RL [pcs :vector-i64 seen :vector-i64])
+(defn rx-add [rc [:ref :kumitate/RC] l [:ref :kumitate/RL] pc :i64 atstart :bool atend :bool] [:ref :kumitate/RL]
+  (if (= (vector-at (:seen l) pc) 1) l
+    (let [l1 (assoc l :seen (vector-assoc (:seen l) pc 1))
+          code (:code rc) op (vector-at code (* 3 pc))]
+      (cond (= op 4) (rx-add rc (rx-add rc l1 (vector-at code (+ (* 3 pc) 1)) atstart atend) (vector-at code (+ (* 3 pc) 2)) atstart atend)
+            (= op 5) (rx-add rc l1 (vector-at code (+ (* 3 pc) 1)) atstart atend)
+            (= op 7) (if atstart (rx-add rc l1 (+ pc 1) atstart atend) l1)
+            (= op 8) (if atend (rx-add rc l1 (+ pc 1) atstart atend) l1)
+            :else (assoc l1 :pcs (vector-conj (:pcs l1) pc))))))
+(defn rx-empty-list [rc [:ref :kumitate/RC]] [:ref :kumitate/RL]
+  (->RL (vector-alloc 0) (vector-alloc (rx-pc rc))))
+
+;; does the compiled pattern match all of s?
+(defn rx-run [rc [:ref :kumitate/RC] s :string] :bool
+  (let [n (tx-len s) code (:code rc)]
+    (loop [i 0 l (rx-add rc (rx-empty-list rc) 0 true (= n 0))]
+      (if (>= i n)
+        (loop [k 0] (cond (>= k (vector-count (:pcs l))) false
+                          (= (vector-at code (* 3 (vector-at (:pcs l) k))) 6) true
+                          :else (recur (+ k 1))))
+        (let [c (tx-cp s i) i2 (+ i (tx-w c)) atend (>= i2 n)
+              nl (loop [k 0 nl (rx-empty-list rc)]
+                   (if (>= k (vector-count (:pcs l))) nl
+                     (let [pc (vector-at (:pcs l) k) op (vector-at code (* 3 pc)) a (vector-at code (+ (* 3 pc) 1))
+                           ok (cond (= op 1) (= c a) (= op 2) (not (= c 10)) (= op 3) (rx-in-class rc a c) :else false)]
+                       (recur (+ k 1) (if ok (rx-add rc nl (+ pc 1) false atend) nl)))))]
+          (if (= (vector-count (:pcs nl)) 0) false (recur i2 nl)))))))
+
+;; "" when pattern is a usable regex, else the refusal code
+(defn rx-check [pattern :string] :string
+  (let [r (rx-parse pattern)]
+    (cond (not (tx-empty? (:err r))) (:err r)
+          (> (rx-size (:node r)) 4000) "regex/too-large"
+          :else "")))
+(defn rx-matches? [pattern :string s :string] :bool
+  (let [r (rx-parse pattern)]
+    (and (tx-empty? (:err r)) (<= (rx-size (:node r)) 4000)
+         (rx-run (rx-compile (:node r)) s))))

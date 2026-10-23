@@ -1,0 +1,2 @@
+;; 99-main: the command's entry (kotoba/kumitate/MANIFEST).
+(defn main [] :i64 (cli-main))

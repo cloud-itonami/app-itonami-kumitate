@@ -1,0 +1,350 @@
+version: 2.1
+
+commands:
+  npm_ci:
+    steps:
+      - restore_cache:
+          keys:
+            - npm-v1-{{ checksum "package-lock.json" }}
+            - npm-v1-
+      - run:
+          name: Install npm packages
+          command: npm ci
+      - save_cache:
+          key: npm-v1-{{ checksum "package-lock.json" }}
+          paths:
+            - ~/.npm
+
+jobs:
+  Circularity:
+    docker:
+      - image: cimg/node:24.21.0
+    steps:
+      - checkout
+      - run: npm version
+      - npm_ci
+      - run: npm run madge
+
+  Publint:
+    docker:
+      - image: cimg/node:24.21.0
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Restore built dist
+          command: mv /tmp/workspace/dist ./dist
+      - run: npm version
+      - npm_ci
+      - run: npm run publint
+
+  Lint:
+    docker:
+      - image: cimg/node:24.21.0
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run: npm version
+      - npm_ci
+      - run: npm run docmodel
+      - run:
+          name: Restore built dist
+          command: rm -rf ./dist && mv /tmp/workspace/dist ./dist
+      - run: npm run lint:docs
+      - run: npm run lint:src
+
+  Formatting:
+    docker:
+      - image: cimg/node:24.21.0
+    steps:
+      - checkout
+      - npm_ci
+      - run: npm run check:format
+
+  Codegen:
+    docker:
+      - image: cimg/node:24.21.0
+    parameters:
+      codegenDeps:
+        type: string
+      # Each codegen major emits slightly different output, so the committed
+      # fixtures are only verified against the most recent major.
+      verify:
+        type: boolean
+        default: false
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run: npm version
+      - npm_ci
+      - run:
+          command: pnpm --version
+          working_directory: integration-tests
+      - run:
+          name: Point codegen at the built tarball
+          working_directory: integration-tests
+          command: |
+            pnpm config set --location=project --json overrides '{
+              "@apollo/client-graphql-codegen": "/tmp/workspace/apollo-client-graphql-codegen.tgz"
+            }'
+      - run:
+          name: Install codegen runner with peer deps under test
+          command: pnpm --filter codegen add -D << parameters.codegenDeps >>
+          working_directory: integration-tests
+      - run: npm run test:codegen
+      - when:
+          condition: << parameters.verify >>
+          steps:
+            - run:
+                name: Verify generated fixtures are up to date
+                command: git diff --exit-code src/local-state/__tests__/LocalState/fixtures
+
+  Tests:
+    docker:
+      - image: cimg/node:24.21.0
+    parameters:
+      project:
+        type: string
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Restore built dist
+          command: mv /tmp/workspace/dist ./dist
+      - run: npm run ci:precheck
+      - run: npm version
+      - npm_ci
+      - run: if test "<< parameters.project >>" = "Core Tests"; then npm run test:memory:only; fi
+      - run:
+          name: Jest suite
+          command: npm run test:ci -- --selectProjects "<< parameters.project >>"
+          environment:
+            JEST_JUNIT_OUTPUT_FILE: "reports/junit/js-test-results-<< parameters.project >>.xml"
+      - store_test_results:
+          path: reports/junit
+      - store_artifacts:
+          path: reports/junit
+  Typecheck:
+    docker:
+      - image: cimg/node:24.21.0
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Restore built dist
+          command: mv /tmp/workspace/dist ./dist
+      - run: npm version
+      - npm_ci
+      - run: npm run typecheck
+
+  Attest:
+    docker:
+      - image: cimg/node:24.21.0
+    steps:
+      - checkout
+      - npm_ci
+      - run: npm run test:type-benches
+
+  BuildTarball:
+    docker:
+      - image: cimg/node:24.21.0
+    steps:
+      - checkout
+      - run: npm run ci:precheck
+      - run: npm version
+      - npm_ci
+      - run: npm run build && cd dist && mv "$(npm pack --json | jq --raw-output '.[0].filename')" apollo-client.tgz
+      - persist_to_workspace:
+          root: dist
+          paths:
+            - apollo-client.tgz
+      - persist_to_workspace:
+          root: .
+          paths:
+            - dist
+
+  BuildCodegenTarball:
+    docker:
+      - image: cimg/node:24.21.0
+    steps:
+      - checkout
+      - run: npm run ci:precheck
+      - run: npm version
+      - npm_ci
+      - run: npm run build -w @apollo/client-graphql-codegen && cd codegen && mv "dist/$(npm pack --ignore-scripts --pack-destination dist --json | jq --raw-output '.[0].filename')" dist/apollo-client-graphql-codegen.tgz
+      - persist_to_workspace:
+          root: codegen/dist
+          paths:
+            - apollo-client-graphql-codegen.tgz
+
+  IntegrationTests:
+    parameters:
+      framework:
+        type: string
+      react:
+        type: string
+    docker:
+      - image: cimg/node:24.21.0-browsers
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          command: pnpm --version
+          working_directory: integration-tests
+      - run:
+          name: Override Apollo Client tarball and React version
+          working_directory: integration-tests
+          command: |
+            VERSION=$(pnpm view react@<< parameters.react >> version)
+            pnpm config set --location=project --json overrides '{
+              "@playwright/test": "1.62.1",
+              "playwright": "1.62.1",
+              "serve": "^14.2.0",
+              "@apollo/client": "/tmp/workspace/apollo-client.tgz",
+              "react": "'"$VERSION"'",
+              "react-dom": "'"$VERSION"'"
+            }'
+      - run:
+          command: pnpm install --no-frozen-lockfile
+          working_directory: integration-tests
+      - run:
+          command: pnpm run --if-present --filter << parameters.framework >> ci-preparations
+          working_directory: integration-tests
+      - run:
+          command: cat pnpm-lock.yaml
+          working_directory: integration-tests
+      - run:
+          command: pnpm exec playwright install-deps
+          working_directory: integration-tests
+      - run:
+          command: pnpm exec playwright install
+          working_directory: integration-tests
+      - run:
+          command: pnpm run --if-present --filter << parameters.framework >> build
+          working_directory: integration-tests
+      - run:
+          command: pnpm run --if-present --filter << parameters.framework >> "/test(:.*|$)/"
+          working_directory: integration-tests
+
+  TestPeerDepTypes:
+    parameters:
+      externalPackage:
+        type: string
+    docker:
+      - image: cimg/node:24.21.0
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          working_directory: integration-tests/peerdeps-tsc
+          command: |
+            npm install
+            npm install @apollo/client@/tmp/workspace/apollo-client.tgz
+            npm install << parameters.externalPackage >>
+            npm test
+
+workflows:
+  Build and Test:
+    jobs:
+      # - Filesize
+      - Tests:
+          requires:
+            - BuildTarball
+          matrix:
+            parameters:
+              project:
+                [
+                  "Core Tests",
+                  "Core Tests - RxJS min version",
+                  "Core Tests - GraphQL 16",
+                  "ReactDOM 17",
+                  "ReactDOM 18",
+                  "ReactDOM 19",
+                  "GraphQL Codegen Plugins",
+                ]
+      - Circularity
+      - Publint:
+          requires:
+            - BuildTarball
+      - Attest
+      - Formatting
+      - Lint:
+          requires:
+            - BuildTarball
+      - Typecheck:
+          requires:
+            - BuildTarball
+      - BuildTarball
+      - BuildCodegenTarball
+      - Codegen:
+          name: Codegen (@graphql-codegen v6)
+          requires:
+            - BuildCodegenTarball
+          codegenDeps: "@graphql-codegen/plugin-helpers@^6.0.0 @graphql-codegen/typescript@^5.0.0 @graphql-codegen/visitor-plugin-common@^6.0.0"
+      - Codegen:
+          name: Codegen (@graphql-codegen v7)
+          requires:
+            - BuildCodegenTarball
+          codegenDeps: "@graphql-codegen/plugin-helpers@^7.0.0 @graphql-codegen/typescript@^6.0.0 @graphql-codegen/visitor-plugin-common@^7.0.0"
+          verify: true
+
+      - IntegrationTests:
+          name: Integration Test << matrix.framework >> with React << matrix.react >>
+          requires:
+            - BuildTarball
+          matrix:
+            parameters:
+              framework:
+                - cra5
+                #- next
+                - node
+                - vite
+                - vite-swc
+                - wrapping-library
+                - type-tests
+                # -browser-esm would need a package publish to npm/CDNs
+              react:
+                - "18.3.0"
+                - latest
+                - next
+            exclude:
+              # CRA only works with React 18
+              - framework: cra5
+                react: next
+              - framework: cra5
+                react: latest
+              # next ships it's own React version anyways
+              - framework: next
+                react: next
+              - framework: next
+                react: "18.3.0"
+              # node doesn't use React in the tests
+              - framework: node
+                react: next
+              - framework: node
+                react: "18.3.0"
+              # we only test AC-internal types
+              - framework: type-tests
+                react: next
+              - framework: type-tests
+                react: "18.3.0"
+      - TestPeerDepTypes:
+          name: Test external types for << matrix.externalPackage >>
+          requires:
+            - BuildTarball
+          matrix:
+            parameters:
+              externalPackage:
+                - "graphql@16"
+                - "graphql@^17.0.0-rc"
+                - "@types/react@17 @types/react-dom@17"
+                - "@types/react@18 @types/react-dom@18"
+                - "@types/react@19 @types/react-dom@19"
+                - "typescript@next"

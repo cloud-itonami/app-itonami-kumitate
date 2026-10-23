@@ -1,0 +1,144 @@
+;; 80-http (prefix ht-): MCP over Streamable HTTP (JSON responses, no SSE) on
+;; the native runtime's TCP capability (wires 43-47). The runtime opens only
+;; the exact address granted in KEXE_CAP_RESOURCES_43; the server answers
+;; POST /mcp with mc-handle and nothing else:
+;;   GET or DELETE /mcp 405, another path 404, a body over 5 MiB 413,
+;;   text that is not UTF-8 400, an Origin header that is not
+;;   http://localhost[:port] or http://127.0.0.1[:port] 403 (DNS rebinding).
+;; One request per connection (Connection: close). The effects are the
+;; listening socket and the bytes of each answer; tools stay pure.
+
+(defn ht-cap [wire :string req :string] :string
+  (cond (tx-eq wire "listen") (typed-cap-call :net/listen :string :string req)
+        (tx-eq wire "accept") (typed-cap-call :net/accept :string :string req)
+        (tx-eq wire "read") (typed-cap-call :net/read :string :string req)
+        :else (typed-cap-call :net/write :string :string req)))
+(defn ht-out [s :string] :i64 (let [r (typed-cap-call :io/write :string :string s)] 0))
+
+;; hex text -> bytes appended to v (lowercase pairs only)
+(defn ht-unhex-into [h :string v :vector-i64] :vector-i64
+  (loop [i 0 acc v]
+    (if (>= (+ i 1) (tx-len h)) acc
+      (recur (+ i 2) (vector-conj acc (+ (* 16 (tx-hex-val (tx-cp h i))) (tx-hex-val (tx-cp h (+ i 1)))))))))
+;; are the bytes canonical UTF-8?
+(defn ht-utf8? [v :vector-i64 a :i64 b :i64] :bool
+  (loop [i a]
+    (if (>= i b) true
+      (let [c (vector-at v i)
+            n (cond (< c 128) 1 (and (>= c 194) (<= c 223)) 2 (and (>= c 224) (<= c 239)) 3 (and (>= c 240) (<= c 244)) 4 :else 0)]
+        (cond (= n 0) false
+              (> (+ i n) b) false
+              (= n 1) (recur (+ i 1))
+              :else
+                (let [ok (loop [k 1] (cond (>= k n) true (= (bit-and (vector-at v (+ i k)) 192) 128) (recur (+ k 1)) :else false))
+                      c1 (vector-at v (+ i 1))
+                      tight (cond (= c 224) (>= c1 160) (= c 237) (< c1 160) (= c 240) (>= c1 144) (= c 244) (< c1 144) :else true)]
+                  (if (and ok tight) (recur (+ i n)) false)))))))
+(defn ht-text [v :vector-i64 a :i64 b :i64] :string
+  (let [sub (loop [i a acc (vector-alloc 0)] (if (< i b) (recur (+ i 1) (vector-conj acc (vector-at v i))) acc))]
+    (string-from-utf8 (bytes-from-vector-i64 sub))))
+;; the UTF-8 bytes of s
+(defn ht-bytes [s :string] :vector-i64
+  (loop [i 0 v (vector-alloc 0)]
+    (if (>= i (tx-len s)) v
+      (let [c (tx-cp s i)]
+        (recur (+ i (tx-w c))
+          (cond (< c 128) (vector-conj v c)
+                (< c 2048) (vector-conj (vector-conj v (+ 192 (i64-shift-right c 6))) (+ 128 (bit-and c 63)))
+                (< c 65536) (vector-conj (vector-conj (vector-conj v (+ 224 (i64-shift-right c 12))) (+ 128 (bit-and (i64-shift-right c 6) 63))) (+ 128 (bit-and c 63)))
+                :else (vector-conj (vector-conj (vector-conj (vector-conj v (+ 240 (i64-shift-right c 18))) (+ 128 (bit-and (i64-shift-right c 12) 63)))
+                                                (+ 128 (bit-and (i64-shift-right c 6) 63))) (+ 128 (bit-and c 63)))))))))
+;; bytes [a, b) of v as lowercase hex text
+(defn ht-hex [v :vector-i64 a :i64 b :i64] :string
+  (let [out (loop [i a acc (vector-alloc 0)]
+              (if (>= i b) acc
+                (let [x (vector-at v i) hi (i64-shift-right x 4) lo (bit-and x 15)]
+                  (recur (+ i 1) (vector-conj (vector-conj acc (if (< hi 10) (+ 48 hi) (+ 87 hi))) (if (< lo 10) (+ 48 lo) (+ 87 lo)))))))]
+    (string-from-utf8 (bytes-from-vector-i64 out))))
+;; write all of s to the connection, 16384 bytes a call
+(defn ht-send [conn :string s :string] :i64
+  (let [v (ht-bytes s) n (vector-count v)]
+    (loop [a 0]
+      (if (>= a n) n
+        (let [b (min n (+ a 16384)) r (ht-cap "write" (tx-cat3 conn " " (ht-hex v a b)))]
+          (if (tx-int? r) (recur b) -1))))))
+(defn ht-reason [code :i64] :string
+  (cond (= code 200) "OK" (= code 202) "Accepted" (= code 400) "Bad Request" (= code 403) "Forbidden" (= code 404) "Not Found"
+        (= code 405) "Method Not Allowed" (= code 413) "Payload Too Large" :else "Error"))
+(defn ht-response [code :i64 body :string] :string
+  (tx-cat5 "HTTP/1.1 " (tx-istr code) " " (ht-reason code)
+           (tx-cat5 "\r\nContent-Type: application/json\r\nContent-Length: " (tx-istr (vector-count (ht-bytes body)))
+                    (if (= code 405) "\r\nAllow: POST" "") "\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n" body)))
+
+;; the index of "\r\n\r\n" in v, or -1
+(defn ht-head-end [v :vector-i64] :i64
+  (let [n (vector-count v)]
+    (loop [i 0] (cond (> (+ i 4) n) -1
+                      (and (= (vector-at v i) 13) (= (vector-at v (+ i 1)) 10) (= (vector-at v (+ i 2)) 13) (= (vector-at v (+ i 3)) 10)) i
+                      :else (recur (+ i 1))))))
+;; a header's value (name in lower case), "" when absent
+(defn ht-header [head :string name :string] :string
+  (let [lines (tx-split head "\r\n")]
+    (loop [i 1]
+      (if (>= i (count lines)) ""
+        (let [l (nth lines i) c (string-index-of l ":")]
+          (if (and (> c 0) (tx-eq (ht-lower (tx-trim (tx-sub l 0 c))) name)) (tx-trim (tx-from l (+ c 1))) (recur (+ i 1))))))))
+(defn ht-lower [s :string] :string
+  (loop [i 0 acc ""]
+    (if (>= i (tx-len s)) acc
+      (let [c (tx-cp s i)] (recur (+ i (tx-w c)) (tx-cat acc (if (and (>= c 65) (<= c 90)) (tx-utf8 (+ c 32)) (tx-utf8 c))))))))
+(defn ht-origin-ok? [o :string] :bool
+  (or (tx-empty? o)
+      (tx-eq o "http://localhost") (tx-starts? o "http://localhost:")
+      (tx-eq o "http://127.0.0.1") (tx-starts? o "http://127.0.0.1:")))
+
+;; the answer to one request (status code and body) from its bytes
+(defrecord HA [code :i64 body :string])
+(defn ht-answer [v :vector-i64 he :i64] [:ref :kumitate/HA]
+  (if (not (ht-utf8? v 0 he)) (->HA 400 "{\"error\":\"http/not-utf8\"}")
+    (let [head (ht-text v 0 he)
+          line (nth (tx-split head "\r\n") 0)
+          parts (tx-split line " ")
+          method (nth parts 0)
+          target (if (> (count parts) 1) (nth parts 1) "")
+          path (let [q (string-index-of target "?")] (if (< q 0) target (tx-sub target 0 q)))
+          n (vector-count v)]
+      (cond (not (ht-origin-ok? (ht-header head "origin"))) (->HA 403 "{\"error\":\"http/origin-refused\"}")
+            (not (or (tx-eq path "/mcp") (tx-eq path "/"))) (->HA 404 "{\"error\":\"http/not-found\"}")
+            (not (tx-eq method "POST")) (->HA 405 "{\"error\":\"http/method-not-allowed\"}")
+            (not (ht-utf8? v (+ he 4) n)) (->HA 400 "{\"error\":\"http/not-utf8\"}")
+            :else (let [ans (mc-handle (ht-text v (+ he 4) n))]
+                    (if (tx-empty? ans) (->HA 202 "") (->HA 200 ans)))))))
+
+;; read one request from conn: the bytes, or an empty vector when it never completed
+(defrecord HQ [bytes :vector-i64 he :i64 status :i64])
+(defn ht-read [conn :string] [:ref :kumitate/HQ]
+  (loop [v (vector-alloc 0) rounds 0]
+    (let [he (ht-head-end v)
+          want (if (< he 0) -1
+                 (let [cl (ht-header (ht-text-safe v he) "content-length")] (if (tx-int? cl) (+ he 4 (tx-int cl)) (+ he 4))))]
+      (cond (and (>= he 0) (> want (+ he 4 (mc-max-input)))) (->HQ v he 413)
+            (and (>= he 0) (>= (vector-count v) want)) (->HQ v he 200)
+            (> (vector-count v) (+ (mc-max-input) 65536)) (->HQ v he 413)
+            (> rounds 2000) (->HQ v he 0)
+            :else (let [r (ht-cap "read" (tx-cat conn " 16384 30000"))]
+                    (cond (tx-empty? r) (->HQ v he 0)
+                          (or (tx-eq r "timeout") (tx-eq r "reset") (tx-eq r "closed") (tx-eq r "refused") (tx-eq r "unreachable")) (->HQ v he 0)
+                          :else (recur (ht-unhex-into r v) (+ rounds 1))))))))
+(defn ht-text-safe [v :vector-i64 he :i64] :string (if (ht-utf8? v 0 he) (ht-text v 0 he) ""))
+
+;; serve addr until `limit` connections were answered (0: no limit)
+(defn ht-serve [addr :string limit :i64] :i64
+  (let [l (ht-cap "listen" addr)
+        z (ht-out (tx-cat3 "kumitate: MCP on http://" addr "/mcp\n"))]
+    (loop [served 0]
+      (if (and (> limit 0) (>= served limit)) served
+        (let [c (ht-cap "accept" (tx-cat l " 30000"))]
+          (if (not (tx-int? c)) (recur served)
+            (let [q (ht-read c)
+                  a (cond (= (:status q) 413) (->HA 413 "{\"error\":\"http/too-large\"}")
+                          (= (:status q) 0) (->HA 0 "")
+                          :else (ht-answer (:bytes q) (:he q)))
+                  w (if (> (:code a) 0) (ht-send c (ht-response (:code a) (:body a))) 0)
+                  x (ht-cap "write" c)]
+              (recur (+ served 1)))))))))

@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"plan/requires-unknown","path":"workflows.w.a.requires","message":"no job `setup` in this workflow"}],"warnings":[]}

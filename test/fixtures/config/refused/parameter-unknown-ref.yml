@@ -1,0 +1,8 @@
+version: 2.1
+jobs:
+  a:
+    docker: [{image: cimg/base:stable}]
+    steps:
+      - run: echo << parameters.nope >> << pipeline.parameters.missing >>
+workflows:
+  w: {jobs: [a]}

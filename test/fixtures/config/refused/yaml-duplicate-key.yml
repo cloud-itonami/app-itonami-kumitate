@@ -1,0 +1,10 @@
+version: 2.1
+jobs:
+  build:
+    docker: [{image: cimg/base:stable}]
+    steps: [checkout]
+  build:
+    docker: [{image: cimg/base:stable}]
+    steps: [checkout]
+workflows:
+  w: {jobs: [build]}

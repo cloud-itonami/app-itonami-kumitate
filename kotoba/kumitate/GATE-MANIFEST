@@ -1,0 +1,20 @@
+# kotoba/kumitate/GATE-MANIFEST -- the unit of the test gate (every module but 99-main, then the tests).
+# One repo-relative path a line; the unit is the files in this order, each
+# followed by one newline. Only 00-ns.kotoba has an ns form.
+kotoba/kumitate/00-ns.kotoba
+kotoba/kumitate/10-text.kotoba
+kotoba/kumitate/20-yaml.kotoba
+kotoba/kumitate/25-json.kotoba
+kotoba/kumitate/26-emit.kotoba
+kotoba/kumitate/27-xml.kotoba
+kotoba/kumitate/30-regex.kotoba
+kotoba/kumitate/35-expr.kotoba
+kotoba/kumitate/40-config.kotoba
+kotoba/kumitate/50-plan.kotoba
+kotoba/kumitate/55-out.kotoba
+kotoba/kumitate/60-api.kotoba
+kotoba/kumitate/70-mcp.kotoba
+kotoba/kumitate/80-http.kotoba
+kotoba/kumitate/90-cli.kotoba
+kotoba/kumitate/tests/t-units.kotoba
+kotoba/kumitate/tests/t-gate.kotoba

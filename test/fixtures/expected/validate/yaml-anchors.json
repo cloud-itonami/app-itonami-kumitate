@@ -1,0 +1,1 @@
+{"valid":true,"errors":[],"warnings":[{"code":"config/unknown-key","path":"defaults","message":"not a top-level key; ignored (anchors may live here)"},{"code":"config/unknown-key","path":"filters-main","message":"not a top-level key; ignored (anchors may live here)"}]}

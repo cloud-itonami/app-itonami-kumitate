@@ -1,0 +1,105 @@
+;; 27-xml (prefix xm-): the XML of JUnit reports, read into Y elements (kind 6:
+;; text = tag; keys/kids = the attributes, child elements under "<>", and the
+;; element's text, trimmed, under "#text"). Read: the XML declaration and other
+;; processing instructions (skipped), comments, CDATA, the five named entities
+;; and &#n; &#xh;. Refused by name: xml/doctype-unsupported (no DTD, no
+;; external entity is ever read), xml/unexpected, xml/unclosed,
+;; xml/mismatched-tag, xml/bad-entity, xml/trailing-content, xml/too-deep.
+
+(defn xm-fail [code :string i :i64] [:ref :kumitate/FR] (->FR (y-null) i code))
+(defn xm-ws [s :string i :i64] :i64
+  (loop [k i] (if (and (< k (tx-len s)) (let [c (tx-cp s k)] (or (= c 32) (= c 9) (= c 10) (= c 13)))) (recur (+ k 1)) k)))
+(defn xm-name-end [s :string i :i64] :i64
+  (loop [k i]
+    (if (>= k (tx-len s)) k
+      (let [c (tx-cp s k)]
+        (if (or (= c 32) (= c 9) (= c 10) (= c 13) (= c 47) (= c 62) (= c 61)) k (recur (+ k (tx-w c))))))))
+;; text with entities replaced; "" + error code in FR
+(defn xm-decode [t :string] [:ref :kumitate/FR]
+  (loop [i 0 acc ""]
+    (let [a (tx-index-from t "&" i)]
+      (if (< a 0) (->FR (y-str (tx-cat acc (tx-from t i))) 0 "")
+        (let [b (tx-index-from t ";" a)]
+          (if (< b 0) (xm-fail "xml/bad-entity" a)
+            (let [e (tx-sub t (+ a 1) b)
+                  r (cond (tx-eq e "lt") "<" (tx-eq e "gt") ">" (tx-eq e "amp") "&" (tx-eq e "quot") "\"" (tx-eq e "apos") "'"
+                          (and (tx-starts? e "#x") (> (tx-len e) 2))
+                            (let [v (loop [k 2 v 0] (cond (>= k (tx-len e)) v (< (tx-hex-val (tx-cp e k)) 0) -1 (> v 1114111) -1 :else (recur (+ k 1) (+ (* v 16) (tx-hex-val (tx-cp e k))))))]
+                              (if (or (< v 1) (> v 1114111) (and (>= v 55296) (<= v 57343))) "" (tx-utf8 v)))
+                          (and (tx-starts? e "#") (tx-int? (tx-from e 1)))
+                            (let [v (tx-int (tx-from e 1))] (if (or (< v 1) (> v 1114111) (and (>= v 55296) (<= v 57343))) "" (tx-utf8 v)))
+                          :else "")]
+              (if (tx-empty? r) (xm-fail "xml/bad-entity" a)
+                (recur (+ b 1) (tx-cat3 acc (tx-sub t i a) r))))))))))
+;; skip comments, processing instructions and whitespace; refuse a DOCTYPE
+(defn xm-misc [s :string i0 :i64] [:ref :kumitate/FR]
+  (loop [i (xm-ws s i0)]
+    (cond (tx-starts? (tx-sub s i (min (tx-len s) (+ i 4))) "<!--")
+            (let [e (tx-index-from s "-->" (+ i 4))] (if (< e 0) (xm-fail "xml/unclosed" i) (recur (xm-ws s (+ e 3)))))
+          (tx-starts? (tx-sub s i (min (tx-len s) (+ i 2))) "<?")
+            (let [e (tx-index-from s "?>" (+ i 2))] (if (< e 0) (xm-fail "xml/unclosed" i) (recur (xm-ws s (+ e 2)))))
+          (tx-starts? (tx-sub s i (min (tx-len s) (+ i 9))) "<!DOCTYPE") (xm-fail "xml/doctype-unsupported" i)
+          :else (->FR (y-null) i ""))))
+;; the element starting at i ('<')
+(defn xm-element [s :string i :i64 depth :i64] [:ref :kumitate/FR]
+  (if (> depth 64) (xm-fail "xml/too-deep" i)
+    (let [ne (xm-name-end s (+ i 1)) tag (tx-sub s (+ i 1) ne)]
+      (if (tx-empty? tag) (xm-fail "xml/unexpected" i)
+        ;; attributes
+        (loop [k ne el (y-new 6 tag 0)]
+          (let [a (xm-ws s k)]
+            (cond (>= a (tx-len s)) (xm-fail "xml/unclosed" i)
+                  (tx-starts? (tx-sub s a (min (tx-len s) (+ a 2))) "/>") (->FR el (+ a 2) "")
+                  (= (tx-cp s a) 62) (xm-content s (+ a 1) el tag depth)
+                  :else
+                    (let [an (xm-name-end s a) name (tx-sub s a an) eq (xm-ws s an)]
+                      (if (or (tx-empty? name) (>= eq (tx-len s)) (not (= (tx-cp s eq) 61))) (xm-fail "xml/unexpected" a)
+                        (let [q0 (xm-ws s (+ eq 1)) q (if (< q0 (tx-len s)) (tx-cp s q0) 0)]
+                          (if (not (or (= q 34) (= q 39))) (xm-fail "xml/unexpected" q0)
+                            (let [qe (tx-index-from s (if (= q 34) "\"" "'") (+ q0 1))]
+                              (if (< qe 0) (xm-fail "xml/unclosed" q0)
+                                (let [v (xm-decode (tx-sub s (+ q0 1) qe))]
+                                  (if (not (tx-empty? (:err v))) (xm-fail (:err v) q0)
+                                    (recur (+ qe 1) (y-put el name (:node v))))))))))))))))))
+;; children and text up to </tag>
+(defn xm-content [s :string i0 :i64 el0 [:ref :kumitate/Y] tag :string depth :i64] [:ref :kumitate/FR]
+  (loop [i i0 el el0 text ""]
+    (let [lt (tx-index-from s "<" i)]
+      (if (< lt 0) (xm-fail "xml/unclosed" i0)
+        (let [chunk (tx-sub s i lt) dt (xm-decode chunk)]
+          (if (not (tx-empty? (:err dt))) (xm-fail (:err dt) i)
+            (let [text2 (tx-cat text (:text (:node dt))) rest (tx-sub s lt (min (tx-len s) (+ lt 9)))]
+              (cond (tx-starts? rest "</")
+                      (let [ne (xm-name-end s (+ lt 2)) close (tx-sub s (+ lt 2) ne) gt (xm-ws s ne)]
+                        (cond (not (tx-eq close tag)) (xm-fail "xml/mismatched-tag" lt)
+                              (or (>= gt (tx-len s)) (not (= (tx-cp s gt) 62))) (xm-fail "xml/unexpected" gt)
+                              :else (->FR (let [t (tx-trim (tx-replace-all (tx-replace-all text2 "\r" "") "\n" "\n"))]
+                                            (if (tx-empty? t) el (y-put el "#text" (y-str t))))
+                                          (+ gt 1) "")))
+                    (tx-starts? rest "<!--")
+                      (let [e (tx-index-from s "-->" (+ lt 4))] (if (< e 0) (xm-fail "xml/unclosed" lt) (recur (+ e 3) el text2)))
+                    (tx-starts? rest "<![CDATA[")
+                      (let [e (tx-index-from s "]]>" (+ lt 9))] (if (< e 0) (xm-fail "xml/unclosed" lt) (recur (+ e 3) el (tx-cat text2 (tx-sub s (+ lt 9) e)))))
+                    (tx-starts? rest "<?")
+                      (let [e (tx-index-from s "?>" (+ lt 2))] (if (< e 0) (xm-fail "xml/unclosed" lt) (recur (+ e 2) el text2)))
+                    :else
+                      (let [c (xm-element s lt (+ depth 1))]
+                        (if (not (tx-empty? (:err c))) c
+                          (recur (:pos c) (y-put el "<>" (:node c)) text2)))))))))))
+(defn xm-parse [s :string] [:ref :kumitate/FR]
+  (let [m (xm-misc s 0)]
+    (cond (not (tx-empty? (:err m))) m
+          (or (>= (:pos m) (tx-len s)) (not (= (tx-cp s (:pos m)) 60))) (xm-fail "xml/unexpected" (:pos m))
+          :else (let [r (xm-element s (:pos m) 0)]
+                  (if (not (tx-empty? (:err r))) r
+                    (let [t (xm-misc s (:pos r))]
+                      (cond (not (tx-empty? (:err t))) t
+                            (< (:pos t) (tx-len s)) (xm-fail "xml/trailing-content" (:pos t))
+                            :else r)))))))
+;; the child elements of el named tag ("" any)
+(defn xm-children [el [:ref :kumitate/Y] tag :string] [:list [:ref :kumitate/Y]]
+  (loop [i 0 acc (y-list)]
+    (if (>= i (y-n el)) acc
+      (recur (+ i 1) (if (and (tx-eq (y-key el i) "<>") (or (tx-empty? tag) (tx-eq (:text (y-at el i)) tag))) (conj acc (y-at el i)) acc)))))
+(defn xm-attr [el [:ref :kumitate/Y] name :string] :string
+  (let [k (y-index el name)] (if (< k 0) "" (:text (y-at el k)))))

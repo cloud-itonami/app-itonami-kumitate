@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"config/version-missing","path":"version","message":"kumitate reads version 2.1 configs"}],"warnings":[]}

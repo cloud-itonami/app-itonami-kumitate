@@ -1,0 +1,1 @@
+{"valid":false,"errors":[{"code":"config/regex","path":"workflows.w.jobs[0].a.filters.branches.only","message":"regex/unsupported: /release-(?=x)/"}],"warnings":[]}

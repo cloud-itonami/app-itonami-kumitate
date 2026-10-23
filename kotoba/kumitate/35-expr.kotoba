@@ -1,0 +1,168 @@
+;; 35-expr (prefix ex-): CircleCI configuration expressions -- job `filters`
+;; and workflow `when`/`unless` written as text, and `<< expr >>` in any field
+;; (configuration-reference "Using expressions in your configuration").
+;;
+;;   expr   := or ; or := and ("or" and)* ; and := cmp ("and" cmp)*
+;;   cmp    := unary (("==" | "!=" | ">=" | ">" | "<=" | "<" | "starts-with") unary
+;;             | "matches" /regex/)?
+;;   unary  := "not" unary | primary ; primary := "(" expr ")" | "string" | number
+;;             | true | false | null | a name (pipeline.git.branch, pipeline.parameters.x, ..)
+;;
+;; and/or short-circuit and return an operand (`a and 10 or 1`); false, null,
+;; 0 and "" are falsy. == between different types is false, != true;
+;; starts-with and matches take strings (a null operand is simply false: a
+;; branch pipeline's tag is null), the order comparisons numbers.
+;; A pipeline.* name the caller did not give is UNKNOWN (kind 7): it decides
+;; nothing, and an expression that needs it is reported, not guessed.
+;; Refused by name: expr/syntax, expr/unknown-name, expr/type, regex/*.
+
+(defrecord EV [names [:list :string] vals [:list [:ref :kumitate/Y]]])
+(defn ev-new [] [:ref :kumitate/EV] (->EV (tx-strs) (y-list)))
+(defn ev-put [e [:ref :kumitate/EV] name :string v [:ref :kumitate/Y]] [:ref :kumitate/EV]
+  (->EV (conj (:names e) name) (conj (:vals e) v)))
+(defn ev-find [e [:ref :kumitate/EV] name :string] :i64
+  (loop [k (- (count (:names e)) 1)] (cond (< k 0) -1 (string=? (nth (:names e) k) name) k :else (recur (- k 1)))))
+;; e plus every entry of the map m as prefix.name
+(defn ev-map [e [:ref :kumitate/EV] prefix :string m [:ref :kumitate/Y]] [:ref :kumitate/EV]
+  (loop [i 0 acc e] (if (< i (y-n m)) (recur (+ i 1) (ev-put acc (tx-cat prefix (y-key m i)) (y-at m i))) acc)))
+
+(defrecord ER [v [:ref :kumitate/Y] pos :i64 err :string])
+(defn ex-unknown [] [:ref :kumitate/Y] (y-new 7 "" 0))
+(defn ex-unknown? [v [:ref :kumitate/Y]] :bool (= (:kind v) 7))
+(defn ex-fail [code :string i :i64] [:ref :kumitate/ER] (->ER (y-null) i code))
+(defn ex-ok? [r [:ref :kumitate/ER]] :bool (tx-empty? (:err r)))
+;; a type error is a value (kind 8, text = the code) until it is known to be
+;; needed: `a or (null > 1)` with a truthy a never looks at the right side
+(defn ex-terr [code :string] [:ref :kumitate/Y] (y-new 8 code 0))
+(defn ex-terr? [v [:ref :kumitate/Y]] :bool (= (:kind v) 8))
+
+;; value types: 0 null, 1 bool, 2 number, 3 string, 7 unknown
+(defn ex-type [v [:ref :kumitate/Y]] :i64
+  (cond (= (:kind v) 7) 7
+        (= (:kind v) 0) 0
+        (= (:kind v) 2) 3
+        (= (:kind v) 1) (cond (y-bool? v) 1 (tx-int? (:text v)) 2 (js-number? (:text v)) 2 :else 3)
+        :else 3))
+(defn ex-truthy? [v [:ref :kumitate/Y]] :bool
+  (let [t (ex-type v)]
+    (cond (= t 0) false (= t 1) (y-true? v) (= t 2) (not (= (tx-int (:text v)) 0)) (= t 3) (not (tx-empty? (:text v))) :else false)))
+
+(defn ex-ws [s :string i :i64] :i64
+  (loop [k i] (if (and (< k (tx-len s)) (let [c (tx-cp s k)] (or (tx-space? c) (= c 10) (= c 13)))) (recur (+ k 1)) k)))
+(defn ex-name-char? [c :i64] :bool (or (tx-alpha? c) (tx-digit? c) (= c 95) (= c 45) (= c 46)))
+;; the word at i (a name or keyword), "" when none
+(defn ex-word-end [s :string i :i64] :i64
+  (if (and (< i (tx-len s)) (tx-alpha? (tx-cp s i)))
+    (loop [k i] (if (and (< k (tx-len s)) (ex-name-char? (tx-cp s k))) (recur (+ k 1)) k))
+    i))
+(defn ex-word-at [s :string i0 :i64] :string (let [i (ex-ws s i0)] (tx-sub s i (ex-word-end s i))))
+(defn ex-at? [s :string i0 :i64 lit :string] :bool
+  (let [i (ex-ws s i0)] (and (<= (+ i (tx-len lit)) (tx-len s)) (tx-eq (tx-sub s i (+ i (tx-len lit))) lit))))
+
+(defn ex-primary [s :string i0 :i64 env [:ref :kumitate/EV] depth :i64] [:ref :kumitate/ER]
+  (let [i (ex-ws s i0) n (tx-len s)]
+    (cond (> depth 32) (ex-fail "expr/syntax" i)
+          (>= i n) (ex-fail "expr/syntax" i)
+          (= (tx-cp s i) 40)
+            (let [r (ex-or s (+ i 1) env (+ depth 1)) k (ex-ws s (:pos r))]
+              (cond (not (ex-ok? r)) r
+                    (or (>= k n) (not (= (tx-cp s k) 41))) (ex-fail "expr/syntax" k)
+                    :else (->ER (:v r) (+ k 1) "")))
+          (= (tx-cp s i) 34)
+            (let [e (ym-close-quote s i n)]
+              (if (< e 0) (ex-fail "expr/syntax" i)
+                (let [u (ym-unescape s (+ i 1) e)] (if (tx-empty? (:err u)) (->ER (:node u) (+ e 1) "") (ex-fail "expr/syntax" i)))))
+          (or (tx-digit? (tx-cp s i)) (and (= (tx-cp s i) 45) (< (+ i 1) n) (tx-digit? (tx-cp s (+ i 1)))))
+            (let [e (loop [k (+ i 1)] (if (and (< k n) (or (tx-digit? (tx-cp s k)) (= (tx-cp s k) 46))) (recur (+ k 1)) k))
+                  t (tx-sub s i e)]
+              (if (js-number? t) (->ER (y-plain t) e "") (ex-fail "expr/syntax" i)))
+          :else
+            (let [e (ex-word-end s i) w (tx-sub s i e)]
+              (cond (tx-empty? w) (ex-fail "expr/syntax" i)
+                    (tx-eq w "true") (->ER (y-plain "true") e "")
+                    (tx-eq w "false") (->ER (y-plain "false") e "")
+                    (tx-eq w "null") (->ER (y-null) e "")
+                    (or (tx-eq w "and") (tx-eq w "or") (tx-eq w "not") (tx-eq w "matches") (tx-eq w "starts-with")) (ex-fail "expr/syntax" i)
+                    :else (let [k (ev-find env w)]
+                            (cond (>= k 0) (->ER (let [v (nth (:vals env) k)] (if (or (y-scalar? v) (y-null? v) (ex-unknown? v)) v (ex-unknown))) e "")
+                                  (tx-starts? w "pipeline.") (->ER (ex-unknown) e "")
+                                  :else (ex-fail "expr/unknown-name" i))))))))
+(defn ex-unary [s :string i0 :i64 env [:ref :kumitate/EV] depth :i64] [:ref :kumitate/ER]
+  (if (tx-eq (ex-word-at s i0) "not")
+    (let [i (ex-ws s i0) r (ex-unary s (+ i 3) env (+ depth 1))]
+      (cond (not (ex-ok? r)) r
+            (ex-unknown? (:v r)) r
+            :else (->ER (y-bool (not (ex-truthy? (:v r)))) (:pos r) "")))
+    (ex-primary s i0 env depth)))
+;; == between values
+(defn ex-equal? [a [:ref :kumitate/Y] b [:ref :kumitate/Y]] :bool
+  (let [ta (ex-type a) tb (ex-type b)]
+    (cond (not (= ta tb)) false
+          (= ta 0) true
+          (= ta 2) (if (and (tx-int? (:text a)) (tx-int? (:text b))) (= (tx-int (:text a)) (tx-int (:text b))) (tx-eq (:text a) (:text b)))
+          :else (tx-eq (:text a) (:text b)))))
+(defn ex-cmp [s :string i0 :i64 env [:ref :kumitate/EV] depth :i64] [:ref :kumitate/ER]
+  (let [l (ex-unary s i0 env depth)]
+    (if (not (ex-ok? l)) l
+      (let [i (ex-ws s (:pos l)) w (ex-word-at s i)
+            op (cond (ex-at? s i "==") "==" (ex-at? s i "!=") "!=" (ex-at? s i ">=") ">=" (ex-at? s i "<=") "<="
+                     (ex-at? s i ">") ">" (ex-at? s i "<") "<" (tx-eq w "starts-with") "starts-with" (tx-eq w "matches") "matches" :else "")]
+        (cond (tx-empty? op) l
+              (tx-eq op "matches")
+                (let [k (ex-ws s (+ i 7))]
+                  (if (or (>= k (tx-len s)) (not (= (tx-cp s k) 47))) (ex-fail "expr/syntax" k)
+                    (let [e (loop [q (+ k 1)] (cond (>= q (tx-len s)) -1 (= (tx-cp s q) 92) (recur (+ q 2)) (= (tx-cp s q) 47) q :else (recur (+ q (tx-w (tx-cp s q))))))]
+                      (if (< e 0) (ex-fail "expr/syntax" k)
+                        (let [pat (tx-sub s (+ k 1) e) chk (rx-check pat)]
+                          (cond (not (tx-empty? chk)) (ex-fail chk k)
+                                (ex-terr? (:v l)) (->ER (:v l) (+ e 1) "")
+                                (ex-unknown? (:v l)) (->ER (ex-unknown) (+ e 1) "")
+                                (= (ex-type (:v l)) 0) (->ER (y-bool false) (+ e 1) "")
+                                (not (= (ex-type (:v l)) 3)) (->ER (ex-terr "expr/type") (+ e 1) "")
+                                :else (->ER (y-bool (rx-matches? pat (:text (:v l)))) (+ e 1) "")))))))
+              :else
+                (let [r (ex-unary s (+ i (tx-len op)) env depth) a (:v l) b (:v r)]
+                  (cond (not (ex-ok? r)) r
+                        (ex-terr? a) (->ER a (:pos r) "")
+                        (ex-terr? b) (->ER b (:pos r) "")
+                        (or (ex-unknown? a) (ex-unknown? b)) (->ER (ex-unknown) (:pos r) "")
+                        (tx-eq op "==") (->ER (y-bool (ex-equal? a b)) (:pos r) "")
+                        (tx-eq op "!=") (->ER (y-bool (not (ex-equal? a b))) (:pos r) "")
+                        ;; a null value (a tag pipeline's branch) starts with nothing
+                        (and (tx-eq op "starts-with") (or (= (ex-type a) 0) (= (ex-type b) 0))) (->ER (y-bool false) (:pos r) "")
+                        (tx-eq op "starts-with")
+                          (if (and (= (ex-type a) 3) (= (ex-type b) 3)) (->ER (y-bool (tx-starts? (:text a) (:text b))) (:pos r) "") (->ER (ex-terr "expr/type") (:pos r) ""))
+                        (not (and (= (ex-type a) 2) (= (ex-type b) 2) (tx-int? (:text a)) (tx-int? (:text b)))) (->ER (ex-terr "expr/type") (:pos r) "")
+                        :else (let [x (tx-int (:text a)) y (tx-int (:text b))]
+                                (->ER (y-bool (cond (tx-eq op ">=") (>= x y) (tx-eq op ">") (> x y) (tx-eq op "<=") (<= x y) :else (< x y))) (:pos r) "")))))))))
+(defn ex-and [s :string i0 :i64 env [:ref :kumitate/EV] depth :i64] [:ref :kumitate/ER]
+  (loop [r (ex-cmp s i0 env depth)]
+    (if (or (not (ex-ok? r)) (not (tx-eq (ex-word-at s (:pos r)) "and"))) r
+      (let [i (ex-ws s (:pos r)) b (ex-cmp s (+ i 3) env depth) a (:v r)]
+        (cond (not (ex-ok? b)) b
+              (ex-terr? a) (recur (->ER a (:pos b) ""))
+              (and (not (ex-unknown? a)) (not (ex-truthy? a))) (recur (->ER a (:pos b) ""))
+              (ex-unknown? a) (recur (->ER (if (and (not (ex-unknown? (:v b))) (not (ex-truthy? (:v b)))) (:v b) (ex-unknown)) (:pos b) ""))
+              :else (recur b))))))
+(defn ex-or [s :string i0 :i64 env [:ref :kumitate/EV] depth :i64] [:ref :kumitate/ER]
+  (loop [r (ex-and s i0 env depth)]
+    (if (or (not (ex-ok? r)) (not (tx-eq (ex-word-at s (:pos r)) "or"))) r
+      (let [i (ex-ws s (:pos r)) b (ex-and s (+ i 2) env depth) a (:v r)]
+        (cond (not (ex-ok? b)) b
+              (ex-terr? a) (recur (->ER a (:pos b) ""))
+              (and (not (ex-unknown? a)) (ex-truthy? a)) (recur (->ER a (:pos b) ""))
+              (ex-unknown? a) (recur (->ER (if (and (not (ex-unknown? (:v b))) (ex-truthy? (:v b))) (:v b) (ex-unknown)) (:pos b) ""))
+              :else (recur b))))))
+;; the whole text as one expression
+(defn ex-eval [s :string env [:ref :kumitate/EV]] [:ref :kumitate/ER]
+  (let [r (ex-or s 0 env 0)]
+    (cond (not (ex-ok? r)) r
+          (< (ex-ws s (:pos r)) (tx-len s)) (ex-fail "expr/syntax" (ex-ws s (:pos r)))
+          (ex-terr? (:v r)) (ex-fail (:text (:v r)) 0)
+          :else r)))
+;; does the text look like an expression rather than a plain value? (an
+;; operator word, a comparison, a quote or a parenthesis outside a plain name)
+(defn ex-looks? [t :string] :bool
+  (or (tx-has? t "==") (tx-has? t "!=") (tx-has? t " and ") (tx-has? t " or ") (tx-starts? t "not ")
+      (tx-has? t " starts-with ") (tx-has? t " matches ") (tx-has? t "(") (tx-has? t "\"")
+      (tx-has? t ">") (tx-has? t "<")))

@@ -1,0 +1,130 @@
+# app-itonami-kumitate
+
+**kumitate（組み立て）は CircleCI 互換の itonami dapp です。** `.circleci/config.yml` を読み、パイプラインがどう組み立てられるかを計算します。何も実行しません。
+
+- config.yml（version 2.1）を検証します。拒否するときは名前付きの理由を返します。
+- 展開後の計画を出します。CircleCI の `config process` とパイプライン作成にあたる計算です。
+  - パラメータの代入、executor と command の展開、`when`／`unless`、matrix の展開、branch／tag の filter と expression の filter、`requires` の DAG、段（level）ごとの並列度を扱います。
+- CircleCI API v2 の Pipeline／Workflow／Job の形で書き出します。
+- 利用者が持っている実行記録（API v2 の items、kumitate.runs.v1）と JUnit XML を読み、失敗・不安定・遅いものを集計します。
+
+書き方は **Kotoba だけ**です。ビルドとテストには amu selfhost の root compiler だけを使います。scittle・CLJS・kbb・nbb・Node・JVM・C は使いません。orbs と CircleCI functions は取得しません。CircleCI と VCS には接続しません。
+
+追跡: Linear JUN-346（Kotoba Labs）。兄弟: [mihari](https://github.com/cloud-itonami/app-itonami-mihari)（Sentry 互換）、[dandori](https://github.com/cloud-itonami/app-itonami-dandori)（Linear 互換）。
+
+この README は、**今この repo に何が在って何が動くか**を書きます。未実装の境界とブロッカーは [`docs/aiueos-dapp.md`](docs/aiueos-dapp.md) にあります。
+
+## 互換の範囲
+
+| 互換である | 互換ではない |
+|---|---|
+| config.yml 2.1 の jobs／workflows／executors／commands／parameters（pipeline・job・command・executor）／matrix（exclude・alias）／`when`・`unless`（logic statement と expression）／`requires`（status 付きを含む）／filters（branches・tags・正規表現・expression） | orbs・inline orb・`functions:`・`job-groups`（名前付きで拒否する） |
+| expression: `filters: pipeline.git.branch == "main"`、`<< pipeline.git.branch == "main" and 10 or 1 >>`、`starts-with`・`matches`・`not`・比較・括弧 | version 2／2.0 の config（`config/version-unsupported`／`config/version-missing`） |
+| `circleci config process` の形の YAML（version 2、matrix の job 名は `job-値-値`、値はパラメータ名順） | setup workflow の continuation、scheduled triggers の評価（warning で知らせる） |
+| API v2 の status enum（`kotoba-lang/com-circleci` の manifest と同じ） | ジョブの実行、circleci.com・GitHub 等への接続 |
+
+- YAML は 1.2 の core schema で読みます。`yes`／`no`／`on`／`off` は文字列のままです（CircleCI 自身の 1.1 系 reader は真偽値として読むことがあります）。
+- tag の pipeline では、tags filter の無い job は動きません（CircleCI の規則）。expression の filter はその式だけで決まります。
+- 渡されなかった pipeline 値（`pipeline.git.branch` など）は決めません。その値に依る filter・`when`・`<< >>` は、書いてある形のまま残し、warning を出します。
+- CircleCI はその権利者の商標です。kumitate は互換を名乗るだけで、提携も同一性も主張しません。
+
+## 何が在るか
+
+| パス | 中身 |
+|---|---|
+| `kotoba/kumitate/00-ns.kotoba` … `99-main.kotoba` | 本体。1 ファイル 1 module で、prefix で名前を分けます（下表）。 |
+| `kotoba/kumitate/MANIFEST` | native command `kumitate` の unit（ファイルをこの順に連結する）。 |
+| `kotoba/kumitate/GATE-MANIFEST` | test gate の unit（`99-main` を除く全 module と `tests/`）。 |
+| `kotoba/kumitate/tests/` | unit test（`test-*` 18 個）と gate の `main`。 |
+| `test/fixtures/` | fixture と期待出力。`MANIFEST` を `kumitate selftest` が読みます。 |
+| `test/fixtures/config/SOURCES.edn` | 実在 config の出所（repo・commit・license・sha256）。 |
+| `aiueos/kumitate.edn` | aiueos アプリ記述子（`:effects #{}` の pure 判断コア）。 |
+| `docs/aiueos-dapp.md` | 設計、未実装の境界、ブロッカー。 |
+| `docs/evidence/` | 実測の記録（compiler・入力・出力の hash、結果、負の対照）。 |
+
+| module | prefix | 中身 |
+|---|---|---|
+| 10-text | `tx-` `y-` `d-` | 文字列・数・リスト、文書ノード Y と診断 D |
+| 20-yaml / 26-emit | `ym-` / `ye-` | YAML の読み（anchor・merge・block scalar・flow）と書き |
+| 25-json / 27-xml | `js-` / `xm-` | JSON の読み書き、JUnit の XML（DTD は拒否） |
+| 30-regex | `rx-` | filter と `matches` の正規表現（Pike VM、全体一致） |
+| 35-expr | `ex-` | CircleCI の expression |
+| 40-config | `cf-` | config の検証（名前付きの拒否） |
+| 50-plan / 55-out | `pl-` / `po-` | 展開後の計画、processed config、ローカル実行の手順 |
+| 60-api | `ap-` | API v2 の形、実行記録、JUnit 集計 |
+| 70-mcp / 80-http | `mc-` / `ht-` | MCP（pure な handler）と、native TCP 上の Streamable HTTP |
+| 90-cli / 99-main | `cli-` | native command |
+
+## 使い方
+
+`kumitate` は amu selfhost が作る loaderless な static ELF です（aarch64-linux／x86_64-linux）。ファイルは `KEXE_CAP_RESOURCES_35` で許したディレクトリの中から、絶対パスで読みます。
+
+```sh
+kumitate validate /abs/.circleci/config.yml
+kumitate plan    /abs/config.yml --branch main --param deploy=true
+kumitate process /abs/config.yml --tag v1.2.3          # config process の形の YAML
+kumitate api     /abs/config.yml --branch main --slug gh/org/repo --number 42 --created-at 2026-10-23T07:00:00.000Z
+kumitate local   /abs/config.yml --branch main          # job ごとの手順。実行はしない
+kumitate runs    /abs/runs.json                         # API v2 items か kumitate.runs.v1
+kumitate runs-export /abs/runs.json circleci-items      # または kumitate
+kumitate junit   /abs/run1.xml /abs/run2.xml
+kumitate selftest /abs/test/fixtures/MANIFEST           # SCANNED n PASS p FAIL f
+```
+
+戻り値は、受理が 0、拒否が 1、使い方の誤りが 2 です。selftest は失敗の数を返し、1 件も走らなければ 3 を返します。
+
+### MCP
+
+agent からは MCP の Streamable HTTP（JSON 応答、SSE なし）で使います。
+
+```sh
+KEXE_ALLOW=37,38,39,43,44,46,47 KEXE_CAP_RESOURCES_43=127.0.0.1:8787 kumitate serve 127.0.0.1:8787
+```
+
+- 開けるのは `KEXE_CAP_RESOURCES_43` で許した 1 つの address だけです。
+- `POST /mcp` に答えます。GET／DELETE には 405、他の path には 404、localhost 以外の `Origin` には 403、5 MiB を超える body には 413 を返します。
+- tool は 8 つです: `kumitate_validate`、`kumitate_plan`、`kumitate_process`、`kumitate_api_shapes`、`kumitate_local_plan`、`kumitate_runs`、`kumitate_runs_export`、`kumitate_junit`。どれも渡されたデータだけを読む pure な関数です。
+- stdio の MCP はまだ作れません。static runtime に stdin（wire 41）が無いためです（kotoba-lang/amu#1516）。
+- itonami-agent の profile では `mcp_servers: {kumitate: {url: "http://127.0.0.1:8787/mcp"}}` と書きます。
+
+## Kotoba gate（amu selfhost だけ）
+
+Node.js・nbb・JVM・babashka・C を使いません。各 MANIFEST のファイルを順に連結して 1 つの unit にし、pin した amu selfhost root で static image にして動かします。arm64 Linux の上ではそのまま動きます。macOS では podman の arm64 VM の中で動かします。
+
+```sh
+AMU=../../kotoba-lang/amu; G=$(mktemp -d)     # G は podman が mount できる場所に置く
+git -C $AMU show 457042ab741520980bceb5bf12970937d1bc8dba:seed/bootstrap/aarch64-linux-static-root.elf > $G/root.elf
+chmod +x $G/root.elf                          # sha256 1739f52f02fc90c28a1fa4a6c3a3f780caeff481893e3a1cd35badd8c227682e
+for m in MANIFEST GATE-MANIFEST; do
+  grep -v '^#' kotoba/kumitate/$m | while read p; do cat "$p"; echo; done > $G/$m.kotoba
+done
+podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35=$G -v $G:$G -w $G \
+  docker.io/library/python:3.12-alpine sh -c '
+  for t in aarch64-linux x86_64-linux; do
+    ./root.elf compile MANIFEST.kotoba      --target $t --output kumitate-$t.elf --format static
+    ./root.elf compile GATE-MANIFEST.kotoba --target $t --output gate-$t.elf     --format static
+  done; chmod +x *.elf'
+# arm64 で: gate は 18 の PASS と :result 18、selftest は SCANNED 75 PASS 75 FAIL 0
+podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35=$PWD -v $G:$G -v $PWD:$PWD -w $PWD \
+  docker.io/library/python:3.12-alpine sh -c "KEXE_STRUCTURED_REPORT=1 $G/gate-aarch64-linux.elf; $G/kumitate-aarch64-linux.elf selftest $PWD/test/fixtures/MANIFEST"
+# x86_64 で（ここでは qemu-user なので seccomp は KEXE_SECCOMP=if-available で外れる）
+podman run --rm --platform linux/amd64 --network none -e KEXE_SECCOMP=if-available -e KEXE_CAP_RESOURCES_35=$PWD -v $G:$G -v $PWD:$PWD -w $PWD \
+  docker.io/library/alpine:3 sh -c "KEXE_STRUCTURED_REPORT=1 $G/gate-x86_64-linux.elf; $G/kumitate-x86_64-linux.elf selftest $PWD/test/fixtures/MANIFEST"
+```
+
+- 期待値: どちらの target でも gate は 18／18、selftest は SCANNED 75 PASS 75 FAIL 0。
+- 負の対照:
+  - matrix の exclude を無視させた写しでは、gate が 17、selftest が FAIL 4 になります。
+  - orbs の拒否を外した写しでは、selftest が FAIL 6 になります。
+- 実測の記録は [`docs/evidence/kotoba-selfhost-gate-20261023.edn`](docs/evidence/kotoba-selfhost-gate-20261023.edn) にあります。
+- CI には入れていません。workspace の CDCI は停止中で、再開は owner が決めます。新しい shell tooling も足していません。
+
+## 未実装（要点）
+
+- **ブラウザの画面**: 未実装でブロッカーがあります。selfhost root に wasm32-browser target がありません（kotoba-lang/amu#1515）。scittle や JS で作り直すことはせず、待ちます。
+- **本物の実行と外部接続**（circleci.com、VCS、ローカルでの job 実行）: 未実装でブロッカーがあります。共有の同意 broker `kotoba-lang/wasm-webcomponent/src/kotoba-client-runtime.js` がまだ存在しません。workspace 契約により、product 側で代わりを書くこともしません。
+- **公開**（sites.edn、IPNS）: ブラウザで動く産物が無いため未着地です。
+
+## ライセンス
+
+AGPL-3.0-or-later（[LICENSE](LICENSE)）。`test/fixtures/config/` の実在 config は、それぞれの原 license のままです（[NOTICE](NOTICE)、`SOURCES.edn`）。

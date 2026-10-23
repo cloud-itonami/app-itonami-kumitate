@@ -1,0 +1,11 @@
+version: 2.1
+jobs:
+  deploy:
+    parameters:
+      region:
+        type: string
+    docker: [{image: cimg/base:stable}]
+    steps: [{run: ./deploy << parameters.region >>}]
+workflows:
+  w:
+    jobs: [deploy]

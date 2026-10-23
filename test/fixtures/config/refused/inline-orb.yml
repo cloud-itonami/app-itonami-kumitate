@@ -1,0 +1,12 @@
+version: 2.1
+orbs:
+  mine:
+    commands:
+      hello:
+        steps: [{run: echo hello}]
+jobs:
+  a:
+    docker: [{image: cimg/base:stable}]
+    steps: [mine/hello]
+workflows:
+  w: {jobs: [a]}

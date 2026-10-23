@@ -1,0 +1,63 @@
+# After the CircleCI docs "Using workflows to orchestrate jobs": fan-out and
+# fan-in, an approval hold, branch and tag filters with regular expressions,
+# and a requirement that also runs on failure.
+version: 2.1
+executors:
+  base:
+    docker:
+      - image: cimg/base:2024.06
+jobs:
+  build:
+    executor: base
+    parallelism: 2
+    steps: [checkout, {run: make build}]
+  unit:
+    executor: base
+    parallelism: 4
+    steps: [checkout, {run: make unit}]
+  lint:
+    executor: base
+    steps: [checkout, {run: make lint}]
+  publish:
+    executor: base
+    steps: [checkout, {run: make publish}]
+  notify:
+    executor: base
+    steps:
+      - run: echo build finished
+workflows:
+  build-test-deploy:
+    jobs:
+      - build:
+          filters:
+            tags:
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+$/
+      - unit:
+          requires: [build]
+          filters:
+            tags:
+              only: /^v.*/
+      - lint:
+          requires: [build]
+          filters:
+            branches:
+              ignore: /dependabot\/.*/
+      - hold:
+          type: approval
+          requires: [unit, lint]
+          filters:
+            branches:
+              only: main
+            tags:
+              only: /^v.*/
+      - publish:
+          requires: [hold]
+          context: [registry]
+          filters:
+            branches:
+              only: [main, /release\/.+/]
+            tags:
+              only: /^v.*/
+      - notify:
+          requires:
+            - build: [success, failed]

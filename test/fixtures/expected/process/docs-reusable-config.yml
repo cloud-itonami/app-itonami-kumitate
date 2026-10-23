@@ -1,0 +1,61 @@
+version: 2
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.12
+    environment:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      LANG: en_US.UTF-8
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - pip-v1-{{ checksum "requirements.txt" }}
+      - run: pip install -r requirements.txt -r dev.txt
+      - run: mkdir -p reports
+      - run: pytest -m unit --junitxml=reports/junit.xml
+      - store_test_results:
+          path: reports
+  integration:
+    docker:
+      - image: cimg/python:3.12
+    environment:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      LANG: en_US.UTF-8
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - pip-v1-{{ checksum "requirements.txt" }}
+      - run: pip install -r requirements.txt -r dev.txt
+      - run: mkdir -p reports
+      - run: pytest -m integration --junitxml=reports/junit.xml
+      - store_test_results:
+          path: reports
+  test-2:
+    docker:
+      - image: cimg/python:3.12
+    environment:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      LANG: en_US.UTF-8
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - pip-v1-{{ checksum "requirements.txt" }}
+      - run: pip install -r requirements.txt -r dev.txt
+      - run: mkdir -p reports
+      - run: pytest -m integration --junitxml=reports/junit.xml
+      - store_test_results:
+          path: reports
+workflows:
+  version: 2
+  test:
+    jobs:
+      - test
+      - integration:
+          requires:
+            - test
+  nightly:
+    jobs:
+      - test-2

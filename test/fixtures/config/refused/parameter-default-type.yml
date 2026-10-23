@@ -1,0 +1,13 @@
+version: 2.1
+parameters:
+  retries:
+    type: integer
+    default: three
+  flavor:
+    type: enum
+    enum: [a, b]
+    default: c
+jobs:
+  a: {docker: [{image: cimg/base:stable}], steps: [checkout]}
+workflows:
+  w: {jobs: [a]}

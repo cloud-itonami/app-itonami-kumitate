@@ -1,0 +1,52 @@
+version: 2
+jobs:
+  build-1.21:
+    docker:
+      - image: cimg/go:1.21
+    steps:
+      - run: go build ./...
+  build-1.22:
+    docker:
+      - image: cimg/go:1.22
+    steps:
+      - run: go build ./...
+  test-linux-on-1.21:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run: echo testing 1.21
+  test-linux-on-1.22:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run: echo testing 1.22
+  test-macos-on-1.22:
+    macos:
+      xcode: 15.4.0
+    steps:
+      - run: echo testing 1.22
+  release:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run: echo release
+workflows:
+  version: 2
+  matrix:
+    jobs:
+      - build-1.21
+      - build-1.22
+      - test-linux-on-1.21:
+          requires:
+            - build-1.21
+      - test-linux-on-1.22:
+          requires:
+            - build-1.22
+      - test-macos-on-1.22:
+          requires:
+            - build-1.22
+      - release:
+          requires:
+            - test-linux-on-1.21
+            - test-linux-on-1.22
+            - test-macos-on-1.22
