@@ -1,0 +1,70 @@
+;; Publication record of the static browser bundle web/ (JUN-346). It lives
+;; here, next to kumitate.wasm.publication.edn, and not in web/: a file inside
+;; web/ would change the CID it records.
+;;
+;; The CID is the UnixFS directory of the 5 files in web/ exactly as committed
+;; (source commit below). Anyone holding the files re-derives it without a node
+;; or a network:
+;;
+;;   ipfs add -r -Q --only-hash --cid-version=1 --raw-leaves --chunker=size-262144 web
+;;
+;; (Kubo 0.41.0. These flags are Kubo's defaults for --cid-version=1, so the
+;; plain `ipfs add -r -Q --only-hash --cid-version=1 web` gives the same CID;
+;; the balanced layout and sha2-256 are defaults too, and 5 entries are far
+;; below the HAMT threshold.) Each file's sha256 is below; kumitate.wasm.js
+;; carries the module whose sha256 kumitate.wasm.publication.edn records, and
+;; the page checks it before running it.
+;;
+;; Routes (root ADR-2609092600, ADR-2609109200; owner 2026-10-22, confirmed for
+;; kumitate 2026-10-23):
+;;   primary    ipfs://{cid} below
+;;   naming     ipns://{k51} - on hold by owner decision; no key was made
+;;   secondary  https://kumitate.itonami.app/ through DNSLink - blocked on
+;;              JUN-324 (registrar, DNS/DNSSEC, ingress/TLS); no record exists
+{:format :kumitate.web-publication/v1
+ :source {:repo "cloud-itonami/app-itonami-kumitate"
+          :commit "05a2b616" :dir "web"}
+ :cid "bafybeidivinjsmoavctigysyjuxtnz7asqhp5s74wd32zrkbpxmqai7aqu"
+ :layout {:unixfs :directory :cid-version 1 :raw-leaves true
+          :chunker "size-262144" :hash "sha2-256" :kubo "0.41.0"}
+ :files [{:name "app.css" :size 5215
+          :sha256 "a657aa914568d6e422dbc36e7e05861fb2f51dc3e63293dd6d03ae41161c133d"
+          :cid "bafkreifgk6vjcrli23scfw6dnz7albq7wl2r3q7ggkj523idvzarmhathu"}
+         {:name "app.js" :size 19262
+          :sha256 "7d7335cdc570e5ad708484bef702d9d9e3a95b45ea3c5ffed387ebb7e3bba8a9"
+          :cid "bafkreid5om243rlq4wwxbbeex33qfwoz4ouvwrpkhrp75u4h5o36ho5ive"}
+         {:name "index.html" :size 4547
+          :sha256 "7fbc8344067dff47517ebd118a0008566edb0f6e7366247d4e465d1151db7a28"
+          :cid "bafkreid7xsbuibt575dvc7v5cgfaaccwn3nq63ttmysh2tsgluivdw32fa"}
+         {:name "kotoba-host.js" :size 6463
+          :sha256 "b63e006e48133a1da5453600bbed5e9e37bbe3955af64c79d27e173275b912e4"
+          :cid "bafkreifwhyag4sathio2krjwac562xu6g656hfk26zghtut6c4zhlois4q"}
+         {:name "kumitate.wasm.js" :size 417735
+          :sha256 "297fe16b8efca73faad0f02d6cbff2980da75aed4496eed2ade8b8859be6dd77"
+          :cid "bafybeihrvqifvomatd6lxstf4k3okardm46olx343znj7a2qvw3gpppcb4"
+          :module-sha256 "5ed9d1b89555c8e1f01631fef00161aa59fc0202b4c9178eaebfeaefcfbac764"}]
+ ;; Published with network-awai/cloud-itonami ops/independent/publish_app_ipfs.py
+ ;; --site-dir web --name kumitate --nodes gad --no-ipns: the CAR of the local
+ ;; add was imported with --pin-roots on gad, which served the same index.html
+ ;; digest; then `routing provide --recursive` on gad. Not on jacob (the owner
+ ;; asked that it not be accessed) or xavier (pin lock, ops/independent/README).
+ :published {:at "2026-10-24T01:05:00Z"
+             :car {:bytes 453980
+                   :sha256 "de12611961ca825003c3b2f412876044340a399f3fba219e46c05af3a5ff2928"}
+             :pinned-on ["gad"]
+             :ipns nil
+             :dnslink nil}
+ ;; Fetched back by a throwaway Kubo 0.41.0 (empty repo, server profile, no
+ ;; mDNS, dhtclient, providing off) on another ISP (219.104.136.140; gad is
+ ;; behind 220.146.177.126), over the public DHT and bitswap. findprovs listed
+ ;; gad alone; the bitswap ledger shows all 453,614 block bytes came from gad.
+ ;; The 5 files equal web/ byte for byte and re-derive the CID above. The
+ ;; throwaway's HTTP gateway served the page both as a path gateway
+ ;; (/ipfs/{cid}/) and as a subdomain gateway ({cid}.ipfs.localhost); headless
+ ;; Chrome loaded it there and the page reported the module's sha256 as
+ ;; verified, so the relative paths and the CSP hold on either origin form.
+ :verified {:at "2026-10-24"
+            :from "throwaway Kubo on another ISP, gad the only provider"
+            :cid-matches true
+            :bytes-match-web true
+            :gateway-load {:path true :subdomain true}}}
