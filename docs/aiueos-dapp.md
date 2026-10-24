@@ -24,7 +24,7 @@ kumitate を「サーバに何も置かない dapp」として作ります。
 | native command | `90-cli`。`validate` `plan` `process` `api` `local` `runs` `runs-export` `junit` `mcp` `serve` `stdio` `selftest` | **実装済み・実測** |
 | agent 統合（MCP） | `80-http`。native TCP（wire 43–47）の上の Streamable HTTP（JSON 応答）。tool は 8 つ | **実装済み・実測**（curl、itonami-agent の HTTP client） |
 | stdio MCP | `85-stdio`。stdin（wire 41）の 1 行 1 message、答えごとに flush と `arena-scope`。tool は 8 つ | **実装済み・実測**（期待出力との一致、1 つずつ届くこと、Claude Code の MCP client。itonami-agent の stdio client は未試験） |
-| ブラウザの画面 | `web/`。config を貼る／開く、検証、計画、DAG、processed config、実行記録と JUnit の集計。Worker の中の `kumitate.wasm` が計算する。CSP `connect-src 'none'` | **実装済み・実測**（headless Chromium。公開は未着地、下記） |
+| ブラウザの画面 | `web/`。config を貼る／開く、検証、計画、DAG、processed config、実行記録と JUnit の集計。Worker の中の `kumitate.wasm` が計算する。CSP `connect-src 'none'` | **実装済み・実測**（headless Chromium。公開は主経路 `ipfs://` のみ、下記） |
 | ローカル実行 | `local` が job ごとの手順を出す。実行はしない | 手順だけ実装。実行は**未実装・ブロック**（下記） |
 | 本家 API・VCS への接続 | circleci.com、GitHub 等 | **未実装・ブロック**（同意 broker が無い） |
 | 分散状態 | ADR 0005 の `mon`／`ito`／`nuno` | **未実装**（設計のみ） |
@@ -112,8 +112,9 @@ workspace の「Kotoba end-user apps run in the user's environment」契約に�
   - その broker（`kotoba-lang/wasm-webcomponent/src/kotoba-client-runtime.js`）は、2026-10-23 の時点で存在しません（GitHub API で 404）。
   - workspace 契約により、product 側で代わりを書くことはしません。
   - 着地したら、記述子に service・endpoint・data category・`each-operation` を宣言します。宣言する操作は、たとえば `GET /api/v2/pipeline/{id}/workflow` と `GET /api/v2/workflow/{id}/job` です。
-- **公開**（sites.edn、`itonami deploy app/kumitate`、IPNS）: 公開できる産物（`web/`）はあります。ただ、公開先が決まっていないので、公開していません。
-  - network-awai/cloud-itonami の `sites.edn` の site には、nbb で動く `:generator` が要ります。`itonami deploy` も kbb／nbb です。どちらも Node なので、kumitate の「Node を使わない」方針と合いません。
-  - 今の配信は Cloudflare Pages の中央コピー（移行在庫）です。主経路の IPFS（`itonami deploy app/{repo}`）は、IPNS を含めて owner 判断で保留されています。
-  - どの経路で公開するかは owner の判断を待っています。`web/` はファイルを置くだけで動きます。
+- **公開**: 経路は owner が決めました（2026-10-22、kumitate には 2026-10-23 に確認）。root ADR-2609092600 と ADR-2609109200、Linear JUN-320 の形です。記録は [`aiueos/kumitate.web.publication.edn`](../aiueos/kumitate.web.publication.edn) にあります。
+  - **主経路 `ipfs://{cid}`: 着地。** `web/` の UnixFS directory の CID を gad の Kubo に pin しました（network-awai/cloud-itonami の `ops/independent/publish_app_ipfs.py --no-ipns`）。別の ISP の使い捨て Kubo から取り直し、バイト列と CID が一致しました。gateway の path 形と subdomain 形のどちらでも、ページが module の sha256 を照合して動きました。
+  - **naming `ipns://{k51}`: 保留**（owner 判断）。
+  - **補助経路 `kumitate.itonami.app`（DNSLink）: JUN-324 待ち。** registrar と DNS がまだ Cloudflare にあり、DNS の変更には owner の承認が要ります。
+  - network-awai/cloud-itonami の `sites.edn` の app org に `:entry "kumitate"` で載せます。この repo の build には Node を入れません（cloud-itonami の目録の生成器は、その repo の既存の仕組みです）。
 - **aiueos への配線**と**分散状態**: kaikei・dandori と同じ段階で、設計だけです。

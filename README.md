@@ -42,6 +42,7 @@
 | `aiueos/kumitate.edn` | aiueos アプリ記述子（`:effects #{}` の pure 判断コア）。 |
 | `aiueos/kumitate.wasm` | `MANIFEST` の unit を amu selfhost root が `wasm32-browser` にした module。`.provenance.edn`（root・unit・出力の hash）と `.publication.edn`（`:kotoba.output-set/v1` の印）が並びます。 |
 | `web/` | ブラウザの画面。静的な HTML・CSS・JS だけで、計算はしません（下の「ブラウザ」）。 |
+| `aiueos/kumitate.web.publication.edn` | `web/` の公開の記録。UnixFS directory の CID、5 ファイルの sha256、pin した node、取り直しの確かめ（下の「未実装」の「公開」）。 |
 | `scripts/browser-build.sh` | `aiueos/kumitate.wasm` とその記録、`web/kumitate.wasm.js`、`web/kotoba-host.js` を作る POSIX sh。 |
 | `docs/aiueos-dapp.md` | 設計、未実装の境界、ブロッカー。 |
 | `docs/evidence/` | 実測の記録（compiler・入力・出力の hash、結果、負の対照）。 |
@@ -213,7 +214,11 @@ podman run --rm --platform linux/arm64 --network none -e KEXE_CAP_RESOURCES_35=$
 ## 未実装（要点）
 
 - **本物の実行と外部接続**（circleci.com、VCS、ローカルでの job 実行）: 未実装でブロッカーがあります。共有の同意 broker `kotoba-lang/wasm-webcomponent/src/kotoba-client-runtime.js` がまだ存在しません。workspace 契約により、product 側で代わりを書くこともしません。
-- **公開**（sites.edn、IPNS）: ブラウザで動く産物（`web/`）はそろいました。どこへ公開するかは owner の判断を待っています（[`docs/aiueos-dapp.md`](docs/aiueos-dapp.md)）。
+- **公開**: 主経路だけが着地しています（[`aiueos/kumitate.web.publication.edn`](aiueos/kumitate.web.publication.edn)）。
+  - 主経路 `ipfs://bafybeidivinjsmoavctigysyjuxtnz7asqhp5s74wd32zrkbpxmqai7aqu` は `web/` の 5 ファイルの UnixFS directory です。gad の Kubo に pin してあり、別の ISP の使い捨て Kubo から取り直して CID が一致しました。
+  - CID は node も network も使わずに出せます: `ipfs add -r -Q --only-hash --cid-version=1 --raw-leaves --chunker=size-262144 web`（Kubo 0.41.0）。
+  - naming の `ipns://{k51}` は owner 判断で保留です。鍵も作っていません。
+  - 補助経路 `https://kumitate.itonami.app/`（DNSLink）は Linear JUN-324（registrar・DNS/DNSSEC・ingress/TLS）待ちです。DNS の record は作っていません。
 
 ## ライセンス
 
