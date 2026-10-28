@@ -26,15 +26,14 @@
     const pinned = window.KUMITATE_WASM;
     if (!pinned || !pinned.base64) throw new Error("kumitate.wasm.js is missing");
     const bytes = Uint8Array.from(atob(pinned.base64), (c) => c.charCodeAt(0));
-    let verified = "not checked (no WebCrypto here)";
-    if (window.crypto && crypto.subtle) {
-      const digest = hex(await crypto.subtle.digest("SHA-256", bytes));
-      if (digest !== pinned.sha256) throw new Error("kumitate.wasm digest mismatch: " + digest);
-      verified = "verified";
+    if (!window.crypto || !window.crypto.subtle) {
+      throw new Error("Cannot verify kumitate.wasm: WebCrypto SHA-256 is unavailable");
     }
+    const digest = hex(await window.crypto.subtle.digest("SHA-256", bytes));
+    if (digest !== pinned.sha256) throw new Error("kumitate.wasm digest mismatch: " + digest);
     const module = await WebAssembly.compile(bytes);
     $("runtime").textContent = "Module kumitate.wasm, " + bytes.length + " bytes, sha256 " + pinned.sha256 +
-      " (" + verified + "); built by " + (pinned.compiler || "the Amu selfhost root") + ".";
+      " (verified); built by " + (pinned.compiler || "the Amu selfhost root") + ".";
     return module;
   }
   function moduleReady() {
