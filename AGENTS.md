@@ -9,3 +9,7 @@
 - Refusals carry a named code (`yaml/...`, `config/...`, `plan/...`, `expr/...`, `regex/...`, `runs/...`, `junit/...`, `xml/...`). Tests pin the code literal.
 - Fixture goldens in `test/fixtures/expected/` change only together with the code that changes them, after reading the diff. Third-party configs keep their bytes; record their source in `test/fixtures/config/SOURCES.edn`.
 - Track work in Linear (Kotoba Labs, JUN-346 and follow-ups).
+
+## Repository guide (merged from CLAUDE.md, which is no longer used)
+
+@AGENTS.md
